@@ -12,8 +12,8 @@
 - 以单变量矩阵研究算法、协议与资源占用，而不是堆叠环境变量碰运气。
 - 正确启动两机四卡测试，并把 GPU、CPU、NIC 拓扑与实际通信路径联系起来。
 
-前置：[nccl-tests](10-nccl-tests.md)；机制：[传输](07-transports.md)、[算法](08-algorithms.md)、[协议](09-device-protocols.md)。
-本章默认已按第 10 章构建 `nccl-tests/build` 和 `build-mpi`，并核对动态库版本。
+主线承接：[nccl-tests](10-nccl-tests.md)；机制回查：[传输](07-transports.md)、[算法](04-algorithms.md)、[协议](09-device-protocols.md)。
+单机实验默认已按第 10 章构建 `nccl-tests/build` 并核对动态库版本；第 8 节的多机实验另需 `build-mpi`。
 
 ## 1. Benchmark 首先是一份“测量合同”
 
@@ -24,7 +24,7 @@
 | --- | --- |
 | 软件 | 两个提交、CUDA runtime、驱动、MPI、网络插件、实际加载的 libnccl |
 | 硬件 | GPU 型号与数量、NVLink／PCIe 拓扑、NIC／端口速率、NUMA |
-| 工作量 | collective、类型、归约方式、实际 size、rank 数与每机 GPU 数 |
+| 工作量 | collective、类型、归约方式、实际 size 与扫描范围、rank 数与每机 GPU 数 |
 | 布局 | 每进程线程数、每线程 GPU 数、设备可见性、CPU 绑定、oop/ip |
 | 时间 | 默认提交到 stream 完成，还是 event／Graph／逐轮阻塞口径 |
 | 样本 | 预热、计时迭代、校验、独立重跑次数、rank 平均或最大口径 |
@@ -52,7 +52,8 @@ B：采用同一 S 定义的有效算法带宽，不是 NIC 物理额定带宽
 粗略转折规模为 `S* ≈ αB`；α 包含 rank 数、算法步数和网络延迟影响，换 P 后不能直接沿用。
 
 从同一稳定大消息区间选 `(S1,T1)`、`(S2,T2)`，用 `B ≈ (S2−S1)/(T2−T1)`、`α ≈ T1−S1/B` 估斜率与截距。
-us 先换成秒，B 才是 B/s；若截距明显为负、残差大或有跳变，先怀疑区间选择和测量噪声。
+us 先换成秒，B 才是 B/s。再取同区间内**未用于拟合**的第三个尺寸 `S3`，预测 `T̂3 = α + S3/B`，用测得的 `T3` 计算残差 `T3−T̂3`；两个拟合点本身不能验证预测能力。
+保持版本、映射、命令与扫描范围等条件一致，独立重跑这三个尺寸，对照残差与重跑波动。若残差超出波动仍持续存在、截距明显为负或曲线有跳变，先检查区间选择和模型适用性；残差落在波动内也不能证明模型处处成立。
 不要跨越算法切换点硬拟合直线：减小启动开销更可能改善小消息，提高链路吞吐更可能改善大消息。
 拥塞、频率变化和 rank 迟到都可能破坏模型；源码也会叠加架构及协议修正，模型只是提出假设的工具。
 
@@ -124,12 +125,18 @@ nccl-tests 2.20.0 还可用 `-U 1` 请求 tuning 列；它使用 profiler 事件
 
 ## 5. Nsight Systems：慢在提交、等待还是执行
 
-只录固定尺寸的短测试，避免一开始就抓整个集群训练。
-先确认本站安装了 Nsight Systems 且允许 profiling；以下不要求修改系统采样权限。
+只录固定尺寸的短测试，避免一开始就抓整个集群训练。**先跑同参数、无 profiler 的固定尺寸对照**，再加 nsys；不要直接拿它与第 3 节扫描中的 8 MiB 行相减当作 profiler 开销。
+按[第 10 章的地址轮换规则](10-nccl-tests.md#5-默认计时主机时钟覆盖提交到-stream-完成)，实际 maxbytes 未缩小时，AllReduce 固定 `8M..8M` 复用一个槽位，`8..256M` 扫描中的 8 MiB 行则轮换 32 个槽位，缓存工作集可能不同。扫描与本节还改变了迭代数，差异不能全归于 profiler。
+先确认本站安装了 Nsight Systems 且允许 profiling；以下不要求修改系统采样权限。两次测试须保持同一 NCCL/tests 版本、实际加载库、GPU/rank 映射、环境及测试命令参数（含尺寸范围）等条件，只增加 profiler；对照重跑波动再判断开销。
 
 ```bash
 # Linux NVIDIA GPU；从 nccl_learn 执行；已构建 tests 并安装 nsys。
 ROOT="${ROOT:-$PWD}"
+# 无 profiler 对照：测试参数与下面的 nsys 命令完全一致。
+env LD_LIBRARY_PATH="$ROOT/nccl/build/lib:${CUDA_HOME:-/usr/local/cuda}/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+  "$ROOT/nccl-tests/build/all_reduce_perf" \
+  -b 8M -e 8M -g 2 -t 1 -w 5 -n 20 -c 1 -a 3
+
 TRACE_DIR="$(mktemp -d "$ROOT/nccl-profile.XXXXXX")"
 env LD_LIBRARY_PATH="$ROOT/nccl/build/lib:${CUDA_HOME:-/usr/local/cuda}/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
   nsys profile --trace=cuda,nvtx,osrt --sample=none \
@@ -138,7 +145,7 @@ env LD_LIBRARY_PATH="$ROOT/nccl/build/lib:${CUDA_HOME:-/usr/local/cuda}/lib64${L
   -b 8M -e 8M -g 2 -t 1 -w 5 -n 20 -c 1 -a 3
 ```
 
-这条命令只在读者有授权的 Linux GPU 作业中执行；报告写到本次独立目录。
+这些命令只在读者有授权的 Linux GPU 作业中执行；报告写到本次独立目录。
 打开生成的报告，按 CPU 线程、CUDA API、stream、GPU kernel 和 NVTX 范围对齐阅读。
 
 1. 先区分初始化、数据准备、预热、计时、校验，不要把 cudaMemset 算作 collective。
@@ -278,3 +285,5 @@ MPI 自己的控制连接／数据传输由 MPI 配置决定，NCCL 的两个变
    **答：**不能；同时改变了算法和协议限制。先比较 Ring+自动协议与 Ring+Simple，并记录实际选择。
 3. 两机四 rank 初始化成功，是否证明 GPU 经目标 RDMA NIC 直接通信且已达峰值？
    **答：**不能；初始化只证明部分控制路径可用，还要核对 NET/GDR、GPU/NIC 映射及数据通路表现。
+
+下一章：[12 调试与故障定位](12-debugging.md)，把调用、设备和网络问题分层排查；实际遇错时也可提前查阅。

@@ -2,6 +2,102 @@
 
 建议每个阶段先独立做题，再看本页后半部分的答案。涉及 GPU 的题在自己的 Linux 实验环境执行；不要用未获授权的集群资源做故障注入。
 
+## 机制检查站：CUDA/UMD 读者的推荐入口
+
+不用先重做数组和指针练习，也不用按题号一次做完：读 04 核心配 B1/B2；读 05/06/07 配 D3；读 08 配 M1/M2，再用 D2 验证批处理；读 09 配 M3/M4；读 10/11 配 M5。写清状态、执行者、前进条件，再给源码或观测依据；题目均可先做纸面分析，有 GPU 时再做自己的受控验证。
+
+### M1. 本地提交完成了，为什么通信仍可能不动？
+
+假设本 rank 输入已就绪、NCCL kernel 已 launch，但 stream 迟迟不完成。列出三类仍未满足的跨参与者条件，并说明你会分别查哪份证据。为什么再向同一 stream 排一个同步/等待不能补齐缺席 rank 的操作？
+
+入口：[03 的跨 rank 等待图](03-cuda-semantics.md)、[08 的 work/proxy 两路推进](08-host-execution.md)、[12 的分层诊断](12-debugging.md)。
+
+### M2. 将一次 API 请求追到设备，但不把对象画错
+
+从 `ncclAllReduceConfigImpl` 开始，标出临时 `ncclInfo`、较长寿命的 task、kernel plan、GPU work descriptor 各由谁持有/消费。解释它们为什么不是同一个硬件 command buffer，以及 host API 返回后用户缓冲为何仍必须有效。
+
+入口：[08](08-host-execution.md)、[14 的状态追踪模板](14-source-map.md)。验收不是函数名列表，而是一张生产者/消费者/寿命表。
+
+### M3. 地址可访问、MR 已注册、请求完成分别证明什么？
+
+对普通 NET/GDR 路径，依次讨论：CUDA 允许 GPU 访问某映射；网络已为该范围建立 MR（memory region，注册内存区域）；某个网络 request 被确认完成；整个 collective 输出已可消费。为什么前三项不能任意替代最后一项？在非用户 buffer 直接注册路径中，协议 FIFO 的消费反馈与应用输出缓冲的复用依赖分别由谁管理？
+
+入口：[07 的连接与注册](07-transports.md)、[09 的数据发布与背压](09-device-protocols.md)。先明确“哪一端、哪一片、哪种完成”，不预设 request 对应整个用户数组。
+
+### M4. 手算 FIFO 安全条件，并追到代码
+
+在普通 Simple FIFO 模型下，`NCCL_STEPS=8`、`StepPerSlice=2`。发送者 `step=8, head=1` 时能否写下一片？head 变成 2 后呢？若接收者 `step=8, tail=9`，能否读取下一片？一个 system-scope fence 能否把这些不满足的条件变成满足？
+
+入口：[09 的 waitPeer/postPeer](09-device-protocols.md)。同时回答 ready 与 credit 各保护哪种错误，并找出 GPU 或 proxy 在当前连接上更新相应状态的位置。
+
+### M5. 让一个性能解释可以被验证或推翻
+
+假设增加 channel/CTA 后，通信独跑更快，但与计算重叠的端到端耗时更长。列出要固定的变量和至少两类需要收集的时间线/计数证据；为什么只比较 `Avg bus bandwidth` 不足以决定保留改动？
+
+入口：[10 的计时与数据量](10-nccl-tests.md)、[11 的资源竞争](11-performance.md)、[16 的关键路径](16-training-integration.md)。无需预设你懂训练框架，先以一个 producer→通信→consumer 依赖图分析。
+
+### 答案要点：用于核查，不替代源码证据
+
+| 题目 | 答案要点 |
+|---|---|
+| M1 | peer 没有匹配/尚未产生数据、proxy/网络尚未完成请求、消费者未返还 credit 都可能阻塞；分别核对各 rank 调用序列、请求/进度与 FIFO 状态。额外本地等待只等既有依赖，不会替对端创造输入或调用 |
+| M2 | info 传递意图，task/plan 保留调度元数据，device work 供 kernel 消费；它们不等于 UMD 的硬件命令存储。元数据已复制不代表 payload 已读完，用户 buffer 寿命另行保证 |
+| M3 | 映射/权限、网络注册、某请求完成各属不同层；collective 还须完成所选协议的可见性、剩余分片和集合步骤。NCCL 管理协议 FIFO 的信用，应用用 CUDA 依赖管理用户输出的寿命；本地 AllReduce 正常完成后可消费本地输出，复用须等自己的后续消费者结束，不另等远端应用确认 |
+| M4 | head=1 时 `1+8<8+2`，不能发送；head=2 时空间条件满足；tail=9 时 `9<8+2`，不能接收。fence 约束访存顺序，不增加空间、不生成远端数据，不能代替这两个谓词 |
+| M5 | 固定操作、尺寸、rank/设备映射、算法协议与测量口径，比较通信/计算独跑和并发时间；检查 CTA/带宽争用、rank 到达与尾部等待。聚合 busbw 不等于应用关键路径耗时 |
+
+接着按需要完成后面的 B/D 组源码与测量题；N 组和 C1/C2 保留作基础速查或快速正确性练习。
+
+## 入门检查站：基础带练速查
+
+需要数组与调用顺序复习时再做这一组，不作为机制主线的前置。没有 GPU 也能完成前三项；第四项要在 Linux NVIDIA GPU 上实际验证，暂时没有设备就标为“待实测”。
+
+### N1. 不看函数名，先画答案
+
+rank 0 的输入为 `[1,2,3,4]`，rank 1 为 `[10,20,30,40]`，类型为 FP32。请分别填写三个操作的每 rank 输出、API count 和缓冲字节数：
+
+1. AllReduce Sum，所有元素参与。
+2. AllGather，每个 rank 贡献完整四个元素。
+3. ReduceScatter Sum，每 rank 接收两个元素。
+
+**提示：** AllGather 拼接，不相加；ReduceScatter 先按对应位置定义规约结果，再按 rank 分块。先写元素数，最后乘 4 得到字节数。
+
+### N2. 四张纸条怎样排序
+
+把下面动作排成安全顺序，并指出哪些可以通过同一 stream 依赖保证，而不需要每一步都让 CPU 同步：
+
+- CPU 校验读回的数组。
+- 把 CPU 输入复制到 GPU。
+- 提交两张卡的 AllReduce。
+- 等待相关 GPU 通信完成并完成 D2H 读回。
+
+**追加一问：** 一个 CPU 线程管理两张卡时，GroupStart/End 应包住什么？
+
+### N3. 找出“没有检查”的地方
+
+某次 tests 的两组结果分别写着 `#wrong=0` 和 `#wrong=N/A`。能否说两种布局都已校验正确？两组 time 是 GPU 0 与 GPU 1 的耗时吗？
+
+**提示：** 回第 10 章找 out-of-place/in-place 表头，不凭数字所在位置猜含义。
+
+### N4. 程序跑通以后，逐段解释一次
+
+按[示例导读](examples/README.md)运行两卡程序。指着代码回答：每个 rank 的输入在哪里填充？每份显存多大？哪个调用建立通信关系？哪个循环只是提交而不是 CPU 求和？哪里确认 GPU 完成？哪里检查了全部 1024 个元素？
+
+**验收：** 每 rank `first=3 expected=3 wrong=0`，最后 `PASS`，且能回答上述六问。只看到 `PASS` 但不知道程序检查了什么，还不算完成这道题。
+
+### 参考答案与回读入口
+
+| 检查项 | 答案要点 | 不确定时回哪里 |
+|---|---|---|
+| N1 AllReduce | 两 rank 都是 `[11,22,33,44]`；count=4；每 rank send/recv 各 16 B | 第 02 章的两卡例子 |
+| N1 AllGather | 两 rank 都是 `[1,2,3,4,10,20,30,40]`；sendcount=4；send 16 B、recv 32 B | 第 02 章的拼接与容量 |
+| N1 ReduceScatter | rank 0 为 `[11,22]`，rank 1 为 `[33,44]`；recvcount=2；send 16 B、recv 8 B | 第 02 章的分片与 count |
+| N2 | 复制→通信→完成等待及读回→CPU校验；同 stream 保证复制在通信前；group 包住两卡的通信提交，不把等待夹在 group 内 | 第 03 章第 1～2 节 |
+| N3 | N/A 不代表已校验；两组为 oop/ip 布局结果，不是两张卡 | 第 10 章入门输出解读 |
+| N4 | 输入全为 rank+1；send/recv 各 1024×4=4096 B；InitAll 建组；GroupEnd 后轮询；遍历全部输出再报 PASS | examples 中的逐段程序说明 |
+
+通过后先尝试 C1 的合法原地改造；A1 的多节点编号、B 组算法、D 组性能与源码题是后续阶段，不要求第一天全部做完。
+
 ## A. 基础：不用 GPU 也能完成
 
 ### A1. 识别三个编号
@@ -112,11 +208,13 @@ python3 nccl-tutorial/examples/ring_simulator.py --self-test
 
 验收记录至少包括：版本、拓扑、完整命令、校验状态、重复运行分布、小包延迟与大包带宽。结论只适用于实际测量条件。
 
-### D2. 追踪一次 AllReduce
+### D2. 验证两次调用是否会合成一次发射
 
-沿 `ncclAllReduce → ncclAllReduceConfigImpl → ncclEnqueueCheck`，再根据当前路径到 group/plan/launch。写出至少三个实际结构或对象的“生产者、消费者、生命周期”。
+在 M2 已追清单个请求生命周期的基础上，比较“一个 group 内提交两次独立 AllReduce”和“分别提交”。假设每个 rank 的两次操作顺序一致、尺寸/类型/规约相同、使用同一 stream，各次输入输出缓冲互不重叠；选普通非捕获路径，连接已通过预热建立。
 
-验收：不能只交函数名列表，要说明用户参数何时变成 task/plan，GPU 看到的描述与 host 结构有什么区别。
+先沿 task 聚合与 plan 打包源码，找出兼容性及参数/work 存储预算怎样允许合并或迫使拆分。若有 GPU，再用自己的受控实验记录两种组织方式的实际 plan/kernel 发射数量及输出正确性；没有 GPU 就给出分支条件，不能把推断写成观测值。
+
+验收：能解释为何“同一个 group”不保证“一次 kernel”，并分别给出源码判断与实际观测的证据；不再重复 M2 的对象定义表。
 
 ### D3. 解释一份网络日志
 
@@ -177,13 +275,13 @@ P=8: busbw = algbw × 2×7/8 = 58.720256 GB/s
 
 **C3：** 校验应遍历所有元素，汇总非零错误并返回失败退出码。只检查第一个元素会漏掉中间错误。
 
-**C4：** 至少有 `produce → ready → comm wait → AllReduce → done → compute wait → consume`。如果使用 group，事件记录要放到有效提交边界后；非阻塞 communicator 还需确认 host 提交完成。
+**C4：** 至少有 `produce → ready → comm wait → AllReduce → done → compute wait → consume`。输入事件 `ready` 在 produce 后记录，通信 stream 再等待它；若使用 group，代表通信输出完成的事件 `done` 必须在有效 GroupEnd 提交边界后记录。非阻塞 communicator 还需先确认相关 host 提交完成，才能安排这个 `done` 事件。
 
 ### D 组
 
 **D1：** 没有统一跑分答案。高质量结论可能是“该机器上大包配置A略优，但小包或并发计算场景不优”。记录失败/不支持和波动，比只留最高一次更可信。
 
-**D2：** 可选 `ncclInfo`、任务队列、kernel plan、device work 描述、proxy operation 等，按当前实际分支追踪。参考第 05/14 章，不要求把全部新旧调度路径一次读完。
+**D2：** 兼容 task 可以共同调优、装入 plan，但参数空间和 work 存储预算等仍可能令同一 group 拆成多个 plans；API 次数不能直接当作 kernel 次数。参考第 08 章的 task 加工、plan 打包与实际 launch 路径，分别记录分支条件和观测到的数量。正确性校验须覆盖两次操作；没有 GPU 时只给源码推断，不填写假想发射次数。
 
 **D3：** 不矛盾，bootstrap 可用 socket，bulk 可用 IB。需要确认日志对应的阶段与连接，以及是否有 fallback、插件、不同 rank 路径混合等情况。
 

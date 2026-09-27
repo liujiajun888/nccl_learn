@@ -5,10 +5,12 @@
 > `ncclCollConfig_t` 明确属于 2.32 的逐集合配置接口；其他机制应各自核对编译、运行时与硬件条件。
 > 编写环境为无 GPU 的 macOS，未执行 CUDA Graph、通信或性能实验。
 
+**整章专题选读，不是 NCCL 入门的前置。** 普通两卡 AllReduce 不需要你先掌握这里的每种机制；[单进程程序](examples/README.md)和[基础测量](10-nccl-tests.md)可按 GPU 条件与主线并行实践，尝试高级机制前保留普通集合的正确性基线。遇到具体问题再选读：提交开销明显看 13.2，缓冲反复复用看 13.3，想在用户 kernel 内融合通信看 13.4～13.6，逐调用调资源看 13.10；硬件能力与新执行路径留作专题。
+
 ## 13.1 学习目标与阅读边界
 
 学完应能判断优化减少的是提交、搬运、SM 占用还是网络工作量，并说明状态由谁创建/推进、何时释放、失败先查哪里。
-前置：[主机执行](05-host-execution.md)、[拓扑](06-topology.md)、[传输](07-transports.md)、[性能](11-performance.md)。
+机制背景按需回查：[拓扑](06-topology.md)、[传输](07-transports.md)、[主机执行](08-host-execution.md)、[性能](11-performance.md)。
 
 | 机制 | 主要想解决的问题 | 主要执行者/状态 |
 |---|---|---|
@@ -154,6 +156,7 @@ ncclCommQueryProperties(comm, &props); // 实际程序检查返回值
 它不是在 `__global__` 内直接调用主机版 `ncclAllReduce`。
 主机通过 [host.h:30、151，`ncclDevCommRequirements_t/ncclDevCommCreate`](../nccl/src/include/nccl_device/host.h#L30) 声明 barrier、GIN signal/counter/context 等需求并创建 `ncclDevComm_t`。
 [src/dev_runtime.cc:1979，`ncclDevCommCreate`](../nccl/src/dev_runtime.cc#L1979) 校验版本/initializer、检查对称支持并复制需求；设备对象不替代主机初始化与错误管理。
+创建本身也是集合操作，communicator 的全体 rank 须按匹配顺序参与。一个 CPU 线程管理多 GPU 时，应把各 rank 的创建调用放进同一 group；逐卡 blocking 创建可能在第一张卡等待尚未发起的其他 rank。创建结束的全体 rank barrier 见 [dev_runtime.cc:1710–1712](../nccl/src/dev_runtime.cc#L1710)，创建任务的 group 入队与结束见 [2062–2070](../nccl/src/dev_runtime.cc#L2062)。
 
 ```text
 主机：comm -> 查询能力 -> 注册 windows -> 创建 devComm/同步资源
@@ -197,17 +200,23 @@ strong signal 的语义覆盖其规定顺序域内此前 puts，weak signal 只�
 本基线主机 RMA 接口 `ncclPutSignal/ncclSignal/ncclWaitSignal` 按 CUDA stream 排序，见 [src/nccl.h.in:763–842](../nccl/src/nccl.h.in#L763)。
 单边写无需目标匹配 `ncclRecv`，但仍需注册窗口、维护信号及内存生命周期；`peerWinOffset` 以字节计，窗口句柄不能用远端裸指针代替。
 
+**PutSignal 不只是注册目标窗口。** 除 `hostRmaSupport` 外，还要求 CUDA driver API 版本至少 12.5；源 buffer 须位于带 `NCCL_WIN_COLL_SYMMETRIC` 的窗口，源/目标窗口都须支持 RMA，且任一窗口都不能由多个物理 cuMem segments 支撑或含 host-backed segment。这是本版 PutSignal 的必要条件，不与 13.4 中“该 flag 并非所有窗口必选”矛盾。
+证据集中在 [src/enqueue/enqueue.cc:2957–2967（能力与版本）](../nccl/src/enqueue/enqueue.cc#L2957)、[2994–3034（PutSignal 窗口检查）](../nccl/src/enqueue/enqueue.cc#L2994)。版本检查是三种 RMA 操作共有的门槛，**上述源/目标窗口要求只限 PutSignal**；Signal/WaitSignal 不携带数据窗口，但仍要求 RMA 已初始化，见 [3067–3073](../nccl/src/enqueue/enqueue.cc#L3067)。
+
 ```text
 R0: produce -> PutSignal(peer=1, W, offset, sigIdx, ctx)
 R1:            WaitSignal(peer=0, sigIdx, ctx) -> consume
 复用同一槽位前：还需确认上一轮 consume 已结束
 ```
 
-应用须规划 signal index、context 和每轮计数；`ncclWaitSignalDesc_t::opCnt` 表达等待的操作数，不能每轮随意清零。
+应用须规划 signal index、context 和每轮计数；`ncclWaitSignalDesc_t::opCnt` 是该描述符**本次等待的信号数（增量，须大于 0）**，不是应用传入的累计目标。
+最小两轮例子：同一 `(peer, sigIdx, ctx)` 每轮发 1 个 signal，每次等待都传 `opCnt=1`。在初始计数为 0 的**非 Graph CE 路径**中，内部等待目标依次为 1、2；若误传 1、2，内部目标就变成 1、3，两轮只发两个信号会少一个。
+入队时 [enqueue.cc:3116–3120](../nccl/src/enqueue/enqueue.cc#L3116) 将 `opCnt` 写入 `nsignals`；[rma_ce.cc:471–488](../nccl/src/rma/rma_ce.cc#L471) 的非捕获分支累加 `signalsHost`。同文件 [492–525](../nccl/src/rma/rma_ce.cc#L492) 的 Graph 分支使用独立信号状态的 wait/reset/ack 循环，不能把 `signalsHost` 的实现泛化到 Graph 或所有后端；公共契约仍是本次信号数。
+**本基线 CE 路径中，配对的 PutSignal/Signal 与 WaitSignal 必须使用一致的 Graph/非 Graph 模式，不能跨模式消费信号。** 两种模式使用不同信号区域，见 [rma_ce.cc:56–62](../nccl/src/rma/rma_ce.cc#L56)；捕获的 PutSignal 写入 `graphSignalsDev`（[222–231](../nccl/src/rma/rma_ce.cc#L222)），非捕获 WaitSignal 却等待 `signalsDev`（[481–488](../nccl/src/rma/rma_ce.cc#L481)），即使 peer、index、context 和计数匹配，也不能由前者满足后者。
 将目标等待放进消费 stream 的依赖链；成功入队不表示 CPU 已观察到完成。
 [src/rma/rma.cc:19，`ncclRmaProxyEnabled`](../nccl/src/rma/rma.cc#L19) 检查跨 LSA、context、全局 proxy 支持及开关；`ncclRmaInitialized` 还查 CE 初始化与代理连接。
 同文件第 43、76 行可见 CE/proxy 分支及 stream 汇合：Host RMA 既非普通 Ring 原语，也非 GIN 设备 API。
-先查询 `hostRmaSupport`，再跟 `scheduleRmaTasksToPlan` 到 `rma_ce.cc/rma_proxy*.cc`，确认数据/信号由谁推进。
+先查询 `hostRmaSupport`，但它不是调用成功的充分条件；再核对上述门控，并跟 `scheduleRmaTasksToPlan` 到 `rma_ce.cc/rma_proxy*.cc`，确认数据/信号由谁推进。
 
 **可观察问题：** put 入队后，另一个 stream 立即读目标为何仍会错？缺的是目标等待与依赖，而非更多带宽。
 
@@ -311,7 +320,7 @@ CE 路径希望让 copy engine 承担复制类通信，减少通信占用计算 
 入口 [第 3337–3347 行，`taskAppend`](../nccl/src/enqueue/enqueue.cc#L3337) 区分 raw-task 路径与原路径。
 继续读 [src/enqueue/task_prep/task_prep.cc:11，`ncclTaskPrepare`](../nccl/src/enqueue/task_prep/task_prep.cc#L11)，
 它串联 pre-tuning、成本计算、classification、post-tuning；随后 [group.cc:991 的实际发射路径](../nccl/src/group.cc#L991) 回退到 legacy `doLaunches`。
-[src/enqueue/task_sched/task_sched.cc:12，`ncclTaskSchedule`](../nccl/src/enqueue/task_sched/task_sched.cc#L12) 可作为未来调度边界的阅读入口，不能把目录中的框架误画成当前 group 的实际必经调用链；细节见 [第 05 章](05-host-execution.md)。
+[src/enqueue/task_sched/task_sched.cc:12，`ncclTaskSchedule`](../nccl/src/enqueue/task_sched/task_sched.cc#L12) 可作为未来调度边界的阅读入口，不能把目录中的框架误画成当前 group 的实际必经调用链；细节见 [第 08 章](08-host-execution.md)。
 这是本基线的可选实现路线，不要为普通集合画一张“必经新 enqueue→GIN→CE”的错误调用图。
 
 ## 13.12 接入顺序、验证与自测

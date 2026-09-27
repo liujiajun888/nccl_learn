@@ -1,6 +1,8 @@
-# 04｜Communicator：把一组 GPU 组织成可执行的通信团队
+# 05｜Communicator：把一组 GPU 组织成可执行的通信团队
 
 > 源码基线：`12df1a11`；`makefiles/version.mk` 为 NCCL **2.32.3**。行号均对应此提交。
+
+**阅读定位：机制解释 → 源码追踪 → 验证实验的主线章节。** 面向已有 CUDA 基础和 UMD 开发经验、初学 NCCL 的读者，直接从分布式初始化进入。本章第 1～6 节回答“通信前怎样建立共同关系”，第 7～9 节的非阻塞、重组与版本分支按需选读；[示例带练](examples/README.md)是可选验证材料，不是前置课程。
 
 ## 学习目标
 
@@ -11,14 +13,23 @@
 - 区分 communicator 可用、主机异步任务完成、GPU 通信完成三个时刻。
 - 正确安排 split、shrink、finalize、destroy 与 abort 的生命周期。
 
-默认你已理解 [01 的整体模型](01-mental-model.md) 和 [03 的 stream 语义](03-cuda-semantics.md)。
-本章只回答“谁与谁组成团队、团队何时可用”；实际提交和传输分别见下一章与第 07 章。
+承接 [04 的算法核心（4.2～4.7）](04-algorithms.md) 与 [03 的 group 与完成边界](03-cuda-semantics.md)，沿用 [01 的 rank/comm 模型](01-mental-model.md)。
+本章只回答“谁与谁组成团队、团队何时可用”；下一站是 [06｜拓扑](06-topology.md)，传输与实际提交分别见 [07｜Transports](07-transports.md) 与 [08｜Host execution](08-host-execution.md)。
+[14｜源码地图](14-source-map.md)与 [15｜练习](15-exercises.md)贯穿阅读；[00｜环境](00-environment.md)与 [examples](examples/README.md)并行速查，不要求重走逐行带练。
+
+## 从 UMD 经验切入：本地 handle 怎样成为团队的一员
+
+下节八 rank 案例中，A 上 rank 0 已选好 GPU，B 上 rank 7 却尚未进入初始化：为什么 rank 0 能独立运行 CUDA kernel，却不能完成这个 communicator 的初始化？
+可以借用本地 handle“持有资源、管理状态与生命周期”的直觉，但 `ncclComm_t` 不是 CUDA context，也不是驱动 handle 的跨进程副本；它保存分布式团队在本 rank 的状态。
+最小因果链是：成员进入同一初始化 → 交换身份与联系信息 → 建立团队及本阶段所需资源 → 发布可用状态。
+rank 7 缺席时，本地对象已分配无法替代它的参与；等它加入并完成所需交换，团队关系才能继续建立。
+状态由谁发布、供谁消费，以及初始化与首轮连接各需要什么证据，见第 3、6 节和章末任务。
 
 ## 1. 贯穿案例：两台机器上的八个训练进程
 
 设主机 A、B 各有四张 GPU，每个进程管理一张 GPU。
 每轮训练要对 **64 MiB FP32 梯度**执行 Sum AllReduce，即每个 rank 的 `count = 16 * 1024 * 1024`。
-本章到第 07 章沿用此案例；机器布局是教学假设，不是实测配置。
+第 05～08 章沿用此案例；机器布局是教学假设，不是实测配置。
 
 | 身份 | 主机 A | 主机 B | 谁决定它 |
 | --- | --- | --- | --- |
@@ -72,6 +83,7 @@ ID 构造：[bootstrap.cc](../nccl/src/bootstrap.cc)，`nccl/src/bootstrap.cc:43
 `ncclCommInitRankDev` 先检查 rank 范围，创建本地 comm 与 abort flags，解析配置。
 它将 `initState` 置为 `ncclInProgress`，并把 ID 拷贝到初始化 job。
 这份拷贝使异步任务不依赖调用者栈上的 ID，同时满足内部对象对齐要求。
+本地检查与对象准备成功后，初始化任务持有 `job->comm` 继续执行；它仍依赖启动器提供一致的成员集合、正确的设备放置与同一会合令牌。
 返回一个非空 handle 的时刻，可能早于团队真正可通信的时刻。
 
 ```text
@@ -92,6 +104,9 @@ ncclCommInitRankFunc ---- cudaSetDevice、设备能力/内核准备
 initState = ncclSuccess   （或错误状态）
 ```
 
+只有完成本分支要求的初始化，任务才发布 `initState = ncclSuccess`；`Init COMPLETE` 是该 rank 的初始化完成证据，不是梯度完成证据。
+非阻塞 API 的后续使用还须等第 7 节查询到主机异步状态成功，不能只看 handle 或这条初始化日志；按需连接的边界见第 6 节。
+
 锚点：[init.cc](../nccl/src/init.cc)，`nccl/src/init.cc:2851`，`ncclCommInitRankDev`；
 `nccl/src/init.cc:2105`，`ncclCommInitRankFunc`；`nccl/src/init.cc:2207`，成功状态发布。
 阅读时先追踪 `job->comm` 和 `comm->bootstrap`，比从头背所有初始化字段更有效。
@@ -100,7 +115,8 @@ initState = ncclSuccess   （或错误状态）
 
 `bootstrapInit` 创建会合与监听状态，让 ranks 获取相邻成员的联系信息并连成 bootstrap ring。
 随后交换 peer 联系地址、proxy 地址等元数据，支撑后面的 all-gather 与点对点控制消息。
-引导 root 是会合协调者，不是每轮 AllReduce 汇聚全部梯度的参数服务器。
+初始化任务必须等所需交换完成，才能消费这些信息建立后续资源关系；rank 7 缺席或会合网络不可达，都不能靠本地 comm 已分配来绕过。
+引导 root 是会合协调者，不是每轮 AllReduce 汇聚全部梯度的参数服务器；这里交换的地址、身份和连接元数据不是 64 MiB 梯度 payload。
 
 常规分支中的 bootstrap ring 用 socket 传递初始化信息。
 **它的 rank 次序不等于最终数据 ring 的次序。**
@@ -154,8 +170,9 @@ initState = ncclSuccess   （或错误状态）
 本版 `comm->runtimeConn = comm->cuMemSupport && ncclParamRuntimeConnect()`。
 启用该分支时，初始化先建立 channel 结构，并处理 NVLS/CollNet 的相应 setup；
 不会像 eager 分支那样直接执行全部列出的 Ring/Tree 连接工作。
-首次使用某算法时，enqueue preparation 可标记 `algoNeedConnect`，group 阶段完成连接再发射。
-Send/Recv 的 peer preconnect 也有独立的按需路径。
+首次使用尚未连接的算法时，enqueue preparation 标记 `algoNeedConnect`，group 消费这个需求并执行连接 job。
+交给 launcher 的条件是所需连接成功完成，而不是“已标记”；连接仍依赖对端协作与设备/传输资源可访问，成本可能落在首轮而非初始化计时中。
+Send/Recv 的 peer preconnect 也有独立的按需路径；准备到发射的调用链见 [08｜Host execution](08-host-execution.md)。
 
 因此应该区分：
 
@@ -163,6 +180,7 @@ Send/Recv 的 peer preconnect 也有独立的按需路径。
 - **连接资源就绪**：对应 buffer、handle、transport 状态已经可用。
 - **本次工作就绪**：工作描述已生成、连接已满足，能够提交。
 
+“本地 handle 已创建”“bootstrap 可达”“本次算法所需连接就绪”是不同证据；引导成功后，若数据路径资源不可用，首轮仍可能停在连接准备而非 GPU 传输。
 第一次 AllReduce 慢，不一定是带宽差，也可能包含连接、注册或其他懒初始化成本。
 但不能反过来说首次慢必然就是 runtime connect；需要日志与 timeline 证据。
 锚点：[init.cc](../nccl/src/init.cc)，`nccl/src/init.cc:1811`，`runtimeConn` 分支；
@@ -217,14 +235,25 @@ Split 产生新对象；即使配置允许共享底层资源，也不是原地�
 `NCCL_SHRINK_ABORT` 会先终止父组进行中的工作，默认模式则不能当作故障逃生按钮。
 
 **Finalize** 是停止提交后的正常收尾，等待已发工作与相关资源安静下来，不是释放 handle 本身。
-非阻塞模式要等状态成功再 destroy；有 CUDA Graph 引用的 persistent plans 时，还要处理图的生命周期。
+本版在初始化成功且未 abort 的路径中，`commDestroySync` 停止 proxy 前还会执行 bootstrap host-local barrier：同一 communicator 的相关同主机 ranks 必须进入收尾，避免过早停 proxy 阻碍 PXN 建连。
+参与集合从 `localRanks` 按 `hostHash` 过滤，包含同主机的其他进程，不是仅看当前进程，也不是整个跨主机 communicator 的全局屏障。
+
+`ncclCommFinalize` 会把收尾加入 job；若一个 CPU 线程管理多个本地 ranks，逐个调用 blocking Finalize，可能在第一个等待其他 ranks 时再也无法发起后续调用。
+可用 `ncclGroupStart/End` 组织该线程负责的各 rank Finalize，让收尾任务一起推进；或者使用非阻塞模式，先发起所有相关 ranks 的 Finalize，再轮询，而不是发起一个就等一个。其他进程也须协调进入正常收尾。
+非阻塞 group 结束后仍要逐 comm 调用 `ncclCommGetAsyncError`，检查查询返回值与被查询状态，确认所有相关 comm 的主机收尾成功后再 destroy；`ncclInProgress` 不是完成。
+有 CUDA Graph 引用的 persistent plans 时，还要妥善结束图的使用并释放相关引用；收尾会等待这些引用消失，不能把一次 replay 完成当作图寿命结束。
+
 **Destroy** 回收本地对象和剩余资源；未先 finalize 时，它可能承担等待/收尾工作，不保证立刻返回。
+但直接 Destroy 不等于逐个 blocking Finalize：`commReclaim` 在同进程成员中最后一次 Destroy/Abort 调用到达时，才为尚未 finalize 的成员安排并发收尾，使它们能够通过上述 barrier。
+因此现有单线程逐个 Destroy 的示例并不因这个 barrier 就必然死锁；它仍依赖相关同主机成员参与收尾，以及已发工作和图引用得到妥善处理。
+
 **Abort** 设置 host/device abort flags 并进入回收，允许放弃未完成结果；它不是正常完成屏障。
 故障后不能只在一个进程 abort，然后期待其他 ranks 自动恢复；Destroy/Abort 后也不能继续复用旧 handle。
 
 源码：[init.cc](../nccl/src/init.cc)，`nccl/src/init.cc:2046`，`commGetSplitInfo`；
-`nccl/src/init.cc:3653`，`ncclCommShrink`；`nccl/src/init.cc:3877`，`ncclCommSplit`；`nccl/src/init.cc:3122`，`commDestroySync`；
-`nccl/src/init.cc:3206`，`ncclCommFinalize`；`nccl/src/init.cc:3331`，`ncclCommDestroy`；`nccl/src/init.cc:3489`，`ncclCommAbort`。
+`nccl/src/init.cc:3653`，`ncclCommShrink`；`nccl/src/init.cc:3877`，`ncclCommSplit`；`nccl/src/init.cc:3122`，`commDestroySync`（3155–3172 行为 host-local barrier）；
+`nccl/src/init.cc:3206–3248`，`ncclCommFinalize` 的 job 提交；`nccl/src/init.cc:3260–3307`，`commReclaim` 的并发收尾；
+`nccl/src/init.cc:3331`，`ncclCommDestroy`；`nccl/src/init.cc:3489`，`ncclCommAbort`。
 
 ## 9. 本版本的集中分歧
 
@@ -250,6 +279,23 @@ NCCL_DEBUG_FILE=/tmp/nccl-init.%h.%p.log ./your_nccl_app
 若卡在 bootstrap，先查会合地址可达性；若 init 完成而首次通信卡住，继续查 runtime connect 与成员调用匹配。
 不要把 host API 耗时直接当作 GPU 通信耗时；测量规范见 [10](10-nccl-tests.md)，排错见 [12](12-debugging.md)。
 
+### 源码追踪/验证任务：找出初始化与首轮连接的交接点
+
+只追普通初始化和首轮 Ring AllReduce；静态追踪不需要 GPU，动态观察复用已有应用与调试器，不需新增代码。
+每一跳记录：**生产者/执行线程 → 持有状态 → 消费者 → ready 条件 → 阶段完成证据 → 尚缺的外部依赖**。
+
+1. 从 `nccl/src/init.cc:2851` 的 `ncclCommInitRankDev` 追 `comm` 与 `job->comm`；在 2893、2910 行标出初始状态和 ID 拷贝，说明非空 handle 还缺什么。
+2. 进入 `nccl/src/init.cc:2105` 的 `ncclCommInitRankFunc`，定位 2190 行 `bootstrapInit`、2196 行 `initTransportsRank`；记录谁生产成员元数据、谁消费它建立资源关系，而非把它记成梯度传输。
+3. 在 `nccl/src/init.cc:1811` 对照 `runtimeConn` 两支，列出 `setupChannel` 与 Ring/Tree connect 调用的差别；记录实际 `cuMemSupport` 和 `runtimeConn`，不要仅抄环境变量。
+4. 在 `nccl/src/init.cc:2207` 找到 `initState` 成功发布；再对照 493 行 `ncclCommEnsureReady` 经 3934 行 `ncclCommGetAsyncError` 查询的是 `asyncResult`，记录初始化完成与主机可继续提交的不同证据，均不是 GPU 完成。
+5. 从 `nccl/src/enqueue/enqueue.cc:572` 追 `algoNeedConnect` 到 `nccl/src/group.cc:824–828` 的连接 job；再到 873 行 `doLaunches`，写明连接成功为何必须在发射之前。
+   注意 `initAlgoChannels` 在标记需求时就会写入；连接完成要看 `asyncJobLaunch`（`nccl/src/group.cc:609`）的 job 结果/等待逻辑，不能只看该标记。
+6. 可选 GPU 验证：固定 rank 布局、大小及 `NCCL_ALGO=Ring NCCL_PROTO=Simple`，分别以 `NCCL_RUNTIME_CONNECT=0`、`1` 启动两次全新运行，各 rank 配置一致。
+   用断点核对第 3、5 步状态，结合上面的日志分别记录初始化、首轮和稳态；若 cuMem 条件不满足，应记录“未进入 runtime 分支”，不编造对照结果。
+   用已有应用的 stream/event 完成检查与正确性校验补上首轮完成证据；只看 host 返回时间不足以证明数据可消费。
+
+最终给出一条带源码位置的因果链：哪里发布 comm ready，哪里才满足首轮连接 ready，哪项观察证明本次 GPU 通信正常完成。
+
 ## 11. 自测与简答
 
 1. 八个进程都打印 `cudaDev=0`，是否一定选卡错误？  
@@ -258,3 +304,5 @@ NCCL_DEBUG_FILE=/tmp/nccl-init.%h.%p.log ./your_nccl_app
    **答：**不违反；runtime connect 可延迟算法连接，但提交依赖它的工作前必须补齐。
 3. 非阻塞 API 的异步状态变成成功，能否立即在 CPU 上读取梯度？  
    **答：**不能据此判断；还要确认对应 GPU stream/event 完成，并遵守内存访问条件。
+
+下一站：[06｜拓扑](06-topology.md)，继续解释硬件可达关系如何约束团队的通信骨架。

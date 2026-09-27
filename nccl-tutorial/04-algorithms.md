@@ -1,10 +1,12 @@
-# 第 08 章：集合算法——从四张卡手算到真实调优
+# 第 04 章：集合算法——从四张卡手算到真实调优
 
 > 基线：NCCL `12df1a11`，版本 `2.32.3`。
 > 本章是源码阅读与纸面推演；编写环境为无 GPU 的 macOS，未运行 CUDA/NCCL 性能实验。
-> 前置：[集合语义](02-collectives.md)、[拓扑](06-topology.md)、[传输](07-transports.md)。
+> 前置：[集合语义](02-collectives.md)。推荐在 [03 的提交与完成](03-cuda-semantics.md)之后，先读本章的算法核心，再进入初始化与资源章节。
 
-## 8.1 学习目标：分清三个问题
+**本章核心是 4.2～4.7：**先逐轮推演 Ring，再比较 Tree，建立“每个参与者处理哪片数据”的直觉；源码映射用来核对这张图，不要求先掌握拓扑搜索或调优实现。4.8～4.10 的支持矩阵与特殊算法放在折叠区，按需展开；完成自测后直接进入第 05 章。
+
+## 4.1 学习目标：分清三个问题
 
 学完本章，应能解释：
 
@@ -13,11 +15,11 @@
 3. 为什么“存在设备实现”“本机可用”“调优器选中”是三件事。
 
 算法回答“哪些数据以什么顺序经过哪些参与者”。
-协议回答“如何表示数据、通知对端、等待可用空间”，下一章再展开。
+协议回答“如何表示数据、通知对端、等待可用空间”，在第 09 章展开。
 传输回答“这条逻辑连接由 P2P、SHM、NET 等什么机制承载”。
 把三层合为一个词，就容易误认为 Ring 必须用某种物理链路。
 
-## 8.2 先固定 rank、环位置、chunk 的含义
+## 4.2 先固定 rank、环位置、chunk 的含义
 
 设有 `P=4` 个 rank，输入数组均含 8 个元素，操作为逐元素求和。
 `Rr` 表示用户 rank r；`Cc` 表示数组中的第 c 块，每块 2 个元素。
@@ -47,7 +49,7 @@ R0 ----> R1 ----> R2 ----> R3
 证据：[src/include/device.h:178，`ncclRing`](../nccl/src/include/device.h#L178) 中有 `prev/next/userRanks/rankToIndex/index`。
 设备入口 [src/device/all_reduce.h:14，`runRing`](../nccl/src/device/all_reduce.h#L14) 使用的是 `ring->index`。
 
-## 8.3 Ring 的第一半：reduce-scatter
+## 4.3 Ring 的第一半：reduce-scatter
 
 目标不是立即让所有卡拿到完整答案，而是让每卡先拥有一个**完整规约块**。
 本例的最终所有权约定为：R0 拿 C0 的和，R1 拿 C1 的和，以此类推。
@@ -117,7 +119,7 @@ RS 第 t 轮**发送前**，Rr 发的 Cc 已包含 `r,r-1,...,r-t` 共 `t+1` 个
 到 `t=P-2`，该块编号为 r，贡献数为 P，所以 Rr 得到 Yr。
 本例采用整数避免舍入干扰；浮点加法改变结合顺序后，低位可能与其他算法不同。
 
-## 8.4 Ring 的第二半：allgather
+## 4.4 Ring 的第二半：allgather
 
 这时只复制完整块，**不再求和**。
 第 t 轮 Rr 发送 `Y[(r-t) mod P]`，接收 `Y[(r-1-t) mod P]`。
@@ -150,7 +152,7 @@ AG 第 t 轮后，Rr 拥有 `Yr,Y(r-1),...,Y(r-t-1)`，共有 `t+2` 个完整块
 “到达顺序”是环上的时间顺序，“输出顺序”是 API 的数据布局，二者不能混淆。
 独立 ReduceScatter/AllGather API 还必须遵守用户 rank 的分块语义；内部环映射负责衔接。
 
-## 8.5 两个数学阶段，不一定是两次 API
+## 4.5 两个数学阶段，不一定是两次 API
 
 对等长分块和相容规约语义，有数学关系：
 
@@ -171,7 +173,7 @@ send -> recv+reduce+send -> 最后规约+写输出+send
 若框架只需要分片梯度，可在数学上停在 ReduceScatter；不必为了套 AllReduce 而做无用 AllGather。
 这与[训练集成](16-training-integration.md)中的参数/梯度分片直接相关。
 
-## 8.6 通信量和时间近似从哪里来
+## 4.6 通信量和时间近似从哪里来
 
 设每卡完整输入大小为 S 字节，各块等长 `S/P`。
 RS 有 `P-1` 轮，AG 有 `P-1` 轮；每轮每卡发送 `S/P`，同时接收同样大小。
@@ -195,7 +197,7 @@ T_ring ≈ 2(P-1) alpha + [2(P-1)/P] S/B
 实际分成多个 channel 后，B 不是把物理峰值机械乘以 channel 数；共享瓶颈仍然存在。
 源文件 [src/tuning/ring.cc:21，`ncclTuningRingModelInit`](../nccl/src/tuning/ring.cc#L21) 应与本模型对照读，而非相互替代。
 
-## 8.7 Tree：缩短依赖深度，而不是放弃带宽
+## 4.7 Tree：缩短依赖深度，而不是放弃带宽
 
 树把叶子的部分结果向上规约，再把结果向下传播。
 平衡树的依赖层数约为 `log2(P)`，不像 Ring 必须沿 P 个位置逐步传播。
@@ -222,7 +224,12 @@ T_ring ≈ 2(P-1) alpha + [2(P-1)/P] S/B
 最终还取决于树的映射、内部节点链路、双树分工、channel 数和消息大小。
 [src/tuning/tree.cc:28–57，`ncclTuningTreeModelInit`](../nccl/src/tuning/tree.cc#L28) 分别建模带宽与层级延迟。
 
-## 8.8 本基线的通用设备算法支持矩阵
+以上是本章核心。需要检查块的归属时可做[第 15 章 B1/B2](15-exercises.md)；初读可跳过下面的专题折叠区，做完章末自测后继续第 05 章。
+
+<details>
+<summary>选读：4.8～4.10 支持矩阵、特殊算法与验证方向</summary>
+
+## 4.8 本基线的通用设备算法支持矩阵
 
 下表是**生成集合与算法组合的范围**，不是硬件无条件支持表。
 依据 [src/device/generate.py:104，`algos_of_coll`](../nccl/src/device/generate.py#L104)、
@@ -243,7 +250,7 @@ T_ring ≈ 2(P-1) alpha + [2(P-1)/P] S/B
 本基线**有**原生 [ncclAlltoAll:648](../nccl/src/nccl.h.in#L648)、[ncclGather:663](../nccl/src/nccl.h.in#L663)、[ncclScatter:678](../nccl/src/nccl.h.in#L678)。
 它们的提交/分解路径与上述五类通用集合算法矩阵不是一一对应；CE 和 symmetric kernels 也在矩阵之外。
 
-## 8.9 NVLS、NVLS_TREE、CollNet、PAT 分别改变了什么
+## 4.9 NVLS、NVLS_TREE、CollNet、PAT 分别改变了什么
 
 **NVLS** 借助受支持 NVLink/NVSwitch 平台的 multicast、multimem 规约能力，减少 GPU 逐跳软件搬运。
 它不是“所有 Ampere 加 NVLink 都支持”：生成规约代码至少要求 CUDA 12.1、SM90，并限制类型/运算。
@@ -255,8 +262,14 @@ T_ring ≈ 2(P-1) alpha + [2(P-1)/P] S/B
 AG/RS 还涉及插件 `iallgather/ireducescatter`、head 数和 arity；不要将 AR 的条件复制给它们。
 完整筛选见 [src/tuning/nvls.cc:19、127，`ncclTuningNvlsModelInit/Sim`](../nccl/src/tuning/nvls.cc#L19)。
 
-**CollNet** 把网络侧集合能力纳入层级算法，Direct 与 Chain 区别主要在 GPU 侧如何汇聚/分发。
-它不是普通 NET 点对点通路的同义词，也不是只要有 IB 网卡就能工作。
+**CollNet** 把网络侧集合能力纳入层级算法。以 AllReduce 为例，head 是本节点代表一部分数据接入集合网络的 GPU；Direct 与 Chain 主要改变节点内怎样把数据送到 head、怎样分回结果。
+
+- **Direct：按 head 分区、直接汇聚。** 可有多个 head；每张 GPU 将不同数据片送给对应 head，head 规约本地各 GPU 的同片 → 各节点对应 head 参与网络 AllReduce → 结果回到 head，再分发给本节点 GPU；每张 GPU 收齐各片。head 自身的输入也参与规约，并把其他分区送到对应 head。
+- **Chain：沿节点内链逐跳规约，再反向传播。** 假设某 channel 的本地顺序为 G0（head）、G1、G2：`G2 → G1 → G0` 逐跳合并输入 → 网络 AllReduce → `G0 → G1 → G2` 保存并转发结果。不同 channel 可以选择不同 head，这不是把所有节点的 GPU 串成一条跨机链。
+
+两条路线省略用户 buffer 直接注册等优化；网络 AllReduce 由集合网络插件承接，不是 GPU 把数据交给某个“下一个远端 rank”。对照 [all_reduce.h:248–365 的 Direct](../nccl/src/device/all_reduce.h#L248)、[638–754 的 Chain](../nccl/src/device/all_reduce.h#L638)，以及 [coll_net.cc:815–826 的插件调用](../nccl/src/transport/coll_net.cc#L815)。
+
+CollNet 不是普通 NET 点对点通路的同义词，也不是只要有 IB 网卡就能工作。
 本基线先检查集合网络插件和操作支持，并有本地 rank 数等约束。
 当前 `maxLocalRanks > NCCL_MAX_DIRECT_ARITY+1` 会使候选无效，须把这当实现条件而非数学定理。
 见 [src/tuning/collnet.cc:11、121，`ncclTuningCollnetModelInit/Sim`](../nccl/src/tuning/collnet.cc#L11)。
@@ -271,7 +284,7 @@ AG/RS 还涉及插件 `iallgather/ireducescatter`、head 数和 arity；不要�
 见同文件 [第 80–99 行，`ncclTuningPatModelSim`](../nccl/src/tuning/pat.cc#L80)。
 这些是该提交的条件，不应写成“PAT 永远只允许一节点一卡”或“PAT 的总耗时严格对数”。
 
-## 8.10 可观察验证：不要背诵“某算法最快”
+## 4.10 可观察验证：不要背诵“某算法最快”
 
 调优先排除无效候选，再比较成本；[src/tuning/tuning.cc:128、155、180](../nccl/src/tuning/tuning.cc#L128) 对应枚举、选择与插件介入。
 选不中可能因为类型、拓扑、插件、协议或用户筛选，不一定因为估计更慢。
@@ -283,7 +296,9 @@ AG/RS 还涉及插件 `iallgather/ireducescatter`、head 数和 arity；不要�
 - 必要时在支持 TRACE 的构建中读最佳 tuning 记录；kernel 名可能是代表入口，不能单靠名字断言协议。
 - 想试 PAT，先选 AG/RS 并核对其有效条件；不要对 AllReduce 强制不存在的 PAT 组合。
 
-## 8.11 自测与答案
+</details>
+
+## 4.11 自测与答案
 
 **题 1：RS 第 1 轮后，R0 更新的是哪块？包含哪些 rank？**
 答：C1，包含 R2、R3、R0，值为 `[3303,4404]`；R0 的编号不决定此轮 chunk 编号。
@@ -291,5 +306,7 @@ AG/RS 还涉及插件 `iallgather/ireducescatter`、head 数和 arity；不要�
 **题 2：P=4 时为什么带宽项是 `1.5S/B`，不是 `3S/B`？**
 答：每卡发六次 S/4，总发送 1.5S；理想全双工模型重叠收发，不把接收量再次串行相加。
 
-**题 3：换成树后带宽更高，是否说明测试错了？PAT 能顺势替代 AllReduce 吗？**
-答：不一定，双树与管线可能更适配拓扑；PAT 在本基线通用算法矩阵中只有 AG/RS，不能据名称替代 AR。
+**题 3：换成树后带宽更高，是否说明测试错了？**
+答：不一定，双树与管线可能更适配拓扑；算法表现还取决于实际映射、资源和消息大小，不能预设 Ring 永远最快。
+
+下一章：[05 Communicator 生命周期](05-communicator.md)，看参与者怎样建立团队与必要的通信资源。

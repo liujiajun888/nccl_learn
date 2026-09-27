@@ -9,8 +9,10 @@
 - 读懂 `nvidia-smi topo -m` 能提供什么、不能证明什么。
 - 沿 `topo.cc → paths.cc → search.cc → connect.cc` 建立可检验的因果链。
 
-初始化时何时调用这些模块见 [04](04-communicator.md)，算法原理留给 [08](08-algorithms.md)。
+承接 [05 的初始化](05-communicator.md)，把 [04 已手算的 Ring/Tree](04-algorithms.md) 放到真实硬件图上；读本章不要求先掌握 task/plan 的实现。
 本章的核心问题是：同样八张 GPU，为什么放置、连线或 NIC 选择不同，就需要不同的通信安排？
+
+**CUDA/UMD 读者切入点：**一对设备能建立映射或允许 P2P，只回答了局部可达性；NCCL 还要为整个 rank 集合安排同时发生的传输。两条各自可达的 path 可能共享一个 PCIe 上行或 NIC，因此单路径“允许访问”不能直接推出多 channel 的总带宽。带着这个差别读第 4～8 节：先看路径能力与瓶颈，再看图搜索如何分配共享资源，最后看逻辑邻接如何交给 transport；此处的 graph 是通信拓扑图，不是 CUDA Graph。
 
 ## 1. 贯穿案例：八卡 AllReduce 的两类距离
 
@@ -127,6 +129,7 @@ GPU -- 50 单位 --> switch -- 25 单位 --> NIC
 
 物理上连着，不等于驱动允许访问，更不等于 NCCL 策略决定使用它。
 路径计算之后，还要结合 P2P、SHM、GDR 能力与策略修正图。
+这里 P2P 指 GPU 间的直接访问，SHM 指主机共享内存路径；GDR（GPUDirect RDMA）关注 NIC 能否直接访问 GPU 内存。GDR 不可用时可能需要 host 中转，所以物理距离不能单独决定可用的数据路径；连接细节见 [07](07-transports.md)。
 例如 GPU peer access 不可用时，GPU 间路径可能被改写为经 CPU 的路径。
 若两个 ranks 连 P2P/SHM 都不能使用，它们在当前本地域中的关系会被标记并参与裁剪。
 这不是把 rank 从 communicator 除名；它仍可通过 NET 参与整个团队。
@@ -159,7 +162,7 @@ Ring 和 Tree 分别搜索；Tree 的 channel 数约束会受 Ring 搜索结果�
 
 为什么要多 channel？一条逻辑 ring 未必能用足所有独立链路，多条分工可提高并行度。
 为什么又不能无限增加？channels 会争用链路、SM、协议缓冲与调度资源。
-拓扑搜索输出的是可用骨架，具体一次 AllReduce 使用多少 channels，还要由 [05](05-host-execution.md) 的调度决定。
+拓扑搜索输出的是可用骨架，具体一次 AllReduce 使用多少 channels，还要由 [08](08-host-execution.md) 的调度决定。
 
 锚点：[search.cc](../nccl/src/graph/search.cc)，`nccl/src/graph/search.cc:1151`，`ncclTopoCompute`；
 [graph.h](../nccl/src/include/graph.h)，`nccl/src/include/graph.h:174`，`ncclTopoGraph`。
@@ -255,3 +258,5 @@ NCCL_GRAPH_DUMP_FILE=/tmp/nccl-graphs.xml ./your_nccl_app
    **答：**不是；共享链路和 GPU 资源会限制并行收益，图搜索只提供估计与安排。
 3. rank 3 的 ring 后继为什么可能不是 rank 4？  
    **答：**rank 是用户编号，ring 次序由拓扑与搜索决定，后继应读对应 channel 的映射。
+
+主线下一步：[07 Transports](07-transports.md)，把已知的邻接关系变成双方可用的连接资源。

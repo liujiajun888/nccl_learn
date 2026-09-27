@@ -278,3 +278,5 @@ ROOT="${ROOT:-$PWD}"
    **答：**不能；本版全局附加检查重点是对称注册一致性，不是通用调用契约检测器。
 3. RAS 发现 rank 无响应后，谁负责替换进程并恢复训练？
    **答：**应用／框架和作业管理器；NCCL 提供状态与通信管理能力，不自动重启 rank 或恢复 checkpoint。
+
+01～12 的普通 NCCL 主线到此完成。后续可按需阅读 [13 进阶专题](13-advanced.md)、使用 [14 源码地图](14-source-map.md)与 [15 练习](15-exercises.md)，或进入 [16 训练集成](16-training-integration.md)。

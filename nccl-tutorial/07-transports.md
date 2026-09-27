@@ -1,6 +1,8 @@
 # 07｜Transports：谁建立访问，谁搬数据，谁推动完成
 
 > 基线：`12df1a11`，NCCL **2.32.3**。本章以普通 host collective 的 P2P、SHM、NET 为主，单列特殊路径边界。
+> **推荐机制主线：机制 → 源码 → 实验。** 从已有 CUDA/UMD 经验进入资源与进度协议，不重讲 malloc/for。
+> 基础数组与集合操作说明可回查 [01](01-mental-model.md) / [02](02-collectives.md)；先掌握本章的因果链，再读分支。
 
 ## 学习目标
 
@@ -9,7 +11,7 @@
 - 解释 UVA、CUDA IPC、cuMem、GDR 和 RDMA memory registration 的关系。
 - 用控制状态与 payload 两条线定位“通信不动”的原因。
 
-拓扑怎样决定邻接见 [06](06-topology.md)，任务怎样准备 proxy op 见 [05](05-host-execution.md)。
+承接 [06 的拓扑与邻接](06-topology.md)，先理解连接资源和 proxy 的职责；这些执行者的工作描述如何生成，后续在 [08](08-host-execution.md) 追踪，不作为本章前置。
 本章不复述整个初始化过程，而是接着回答：已经知道邻居之后，数据怎样真正到达它？
 
 ## 1. 贯穿案例：同一个 AllReduce，边上可以走不同 transport
@@ -58,6 +60,23 @@ peer/channel 需求
 锚点：[transport.cc](../nccl/src/transport.cc)，`nccl/src/transport.cc:23`，`selectTransport`；
 `nccl/src/transport.cc:125`，`ncclTransportP2pSetup`；
 [transport.h](../nccl/src/include/transport.h)，`nccl/src/include/transport.h:129`，`ncclTransportComm`。
+
+### 用 UMD 资源生命周期理解两端握手
+
+把熟悉的 allocation（资源实体）、VA mapping（本地地址映射）、access（访问授权）分开，再加上 peer 的准备状态。
+这是生命周期与职责的类比，不是说 NCCL connector 就是某个 UMD 队列或驱动对象；两端各自持有资源和引用。
+
+| 阶段 | 两端必须建立的条件 |
+| --- | --- |
+| `canConnect` | 各自按连接方向检查能力与策略；能连不等于已分配、已映射 |
+| `setup` | 准备本地资源/端点，生成可交换描述；尚不能假定 peer 已完成 |
+| `connect` | 消费交换来的描述，导入/映射/授权或推进网络握手；跨进程共享 handle 不是共享裸 VA |
+| ready | connect 成功、设备连接信息就绪后才可用；这是教学状态名，不是额外的 NCCL API，也不是 payload ready |
+| use | GPU/proxy 按信用和就绪通知使用资源；本地提交不能替代 peer 的推进 |
+| teardown | 确保使用结束后，各持有者释放自己的注册、映射和资源引用；不能因本地不再提交就提前释放 |
+
+这里真有生命周期竞态：[nccl/src/transport.cc:321–347](../nccl/src/transport.cc#L321) 的连接后同步，防止快 rank 销毁时慢 rank 还在导入。
+它保障的是连接资源交接，不是每片 payload 的完成屏障；use 阶段另有下面的进度协议。
 
 ## 3. P2P：UVA 给地址解释，不自动给访问权限
 
@@ -126,6 +145,11 @@ Bootstrap 使用 socket，不决定 NET bulk 必然使用 TCP；同样，机器�
 
 主机侧网络接口的核心不是一个阻塞 `send`，而是一组可推进的操作：
 
+先不要求熟悉 RDMA（Remote Direct Memory Access，远程直接内存访问）：可先理解为 NIC 在授权条件下访问通信内存。
+**MR（memory region，内存区域）** 是网络注册所描述的地址范围及访问元数据；`regMr` 返回的 `mhandle` 是注册句柄，不是数据本身。
+**request** 是一次已受理异步操作的跟踪对象；**completion** 是 `test` 报告该请求完成，既不是“调用返回”，也不是“应用已消费”。
+可类比 UMD 的提交/完成分离，但网络 request 不必与单个 NIC 工作请求一一对应；NIC 工作请求及其完成也不是 CUDA event。
+
 | 接口 | 作用 | 调用成功不代表什么 |
 | --- | --- | --- |
 | `listen/connect/accept` | 建立端点、交换可连接的 handle | 不代表用户数据已传输 |
@@ -162,6 +186,9 @@ RDMA memory registration 的输入是**已经存在的地址范围**。
 它不是 `cudaMalloc`，也不要求把原 buffer 内容复制一遍。
 解除注册与释放 allocation 也不是同一件事；未完成请求仍引用该范围时，不能抢先失效或复用。
 
+从 UMD 视角再分一道边界：**CUDA 可访问 ≠ NIC 已注册；MR 注册完成 ≠ payload 传输完成。**
+前者回答 GPU 能否解引用，注册回答网络设备能否按其规则访问，请求完成才回答某次传输推进到了哪里。
+
 本版 IB 注册实现带有缓存和引用计数，并可通过 DMA-BUF 注册 GPU 内存。
 因此首轮可能承担注册成本，稳态复用注册；仅看首轮耗时会混淆准备成本与链路吞吐。
 锚点：[reg.cc](../nccl/src/transport/net_ib/reg.cc)，`nccl/src/transport/net_ib/reg.cc:10`，`ncclIbRegMrDmaBufInternal2`；
@@ -194,6 +221,13 @@ NET 则按连接和 device handle 的能力决定是否需要 host progress。
 若发送方 GPU 没发布 ready，proxy 无数据可送；若接收方 GPU 不消费，credit 最终耗尽。
 若 NIC 已完成写入但可见性步骤未满足，也不能随便提前通知 GPU 读取。
 这正是“网络没有报错但 kernel 卡住”需要同时检查两端状态的原因。
+
+把 64 MiB 中一片 GPU 数据 s 单独拿出：沿 A1→B1 的普通 NET/Simple、IB/GDR、非 shared 协议缓冲路径，不取用户 buffer 直接注册分支。
+UMD 提交本地 kernel 只是安排本地 GPU 执行：s 仍须进入获准使用的发送 FIFO，发布就绪后，send proxy 才能尝试 `isend`。
+Payload 的路线是发送 GPU 协议 buffer → NIC → 网络 → NIC → 接收 GPU 协议 buffer；proxy 交接请求/状态，不是逐字节搬运者。
+接收 proxy 先投递 `irecv`，等网络完成及必要 flush 后发布 tail；B1 kernel 才能读取 s、规约/转发，并返还接收 head。
+发送 `test` 完成归还的是 A1 本地发送槽位，不等于 B1 已消费；B1 的消费反馈约束接收槽位复用，背压可沿网络向上游传递。
+因此本地 launch 已提交仍依赖 proxy/NIC/peer 持续推进；CPU service 的资源准备成功，更不能替代这条 use 阶段链路。
 
 锚点：[net.cc](../nccl/src/transport/net.cc)，`nccl/src/transport/net.cc:1324`，`sendProxyProgress`；
 `nccl/src/transport/net.cc:1493`，`recvProxyProgress`；
@@ -256,3 +290,19 @@ NET 偏好和能力判断仍可能改变结果，不能预写“禁用 P2P 后�
    **答：**不是；GDR 描述 NIC↔GPU 的 payload 路径，host progress 是否需要由连接能力另外决定。
 3. RDMA 注册成功是否表示新显存已分配，或者数据已传完？  
    **答：**都不是；它为已有范围建立网络访问条件，allocation 与请求完成各有独立生命周期。
+
+## 12. 无 GPU 追踪任务：分别记资源账与进度账
+
+只读本基线源码即可完成：针对第 7 节的 s，记录“谁持有资源、谁写状态、谁等状态、什么条件允许下一步”，不改代码或执行故障注入。
+
+1. 沿 [nccl/src/transport.cc:23，`selectTransport`](../nccl/src/transport.cc#L23) 和 125 的 `ncclTransportP2pSetup`，标出 setup、193–220 的描述交换、247–280 的 connect/connected；连接后同步为什么不是 payload 完成？
+2. 对照 [nccl/src/transport/p2p.cc:267，`ncclP2pImportShareableBuffer`](../nccl/src/transport/p2p.cc#L267)：294/297 导入、299 reserve VA、300 map、309 set access；写明每步建立了什么，为什么不能只传裸 VA。
+3. 在 [nccl/src/transport/net.cc:1024、1197](../nccl/src/transport/net.cc#L1024) 找 `sendProxyConnect/recvProxyConnect` 的注册，再看 1216/1271 的 `sendProxyFree/recvProxyFree`：注册、请求、allocation 的生命周期哪里不同？
+4. 沿 [nccl/src/transport/net.cc:1324，`sendProxyProgress`](../nccl/src/transport/net.cc#L1324) 的 1382→1437→1459→1471，记录 GPU 就绪、发送请求、完成、发布 head；再沿 1493 的 `recvProxyProgress` 跟 1613→1643→1735→1753，记录接收请求、完成、发布 tail、读取 GPU 消费 head。
+   把两个 head 分开命名；设备侧谁读写它们，继续完成 [09 的四字段追踪](09-device-protocols.md#914-无-gpu-状态追踪一片数据的四个交接字段)。
+   若问背压怎样跨网返回，看 [nccl/src/transport/net_ib/p2p.cc:287–297，`ncclIbIsend`](../nccl/src/transport/net_ib/p2p.cc#L287)：尚未看到对端投递对应接收时，返回空 request，不能当作发送已完成。
+5. 用 [nccl/src/transport/shm.cc:467，`shmTransport`](../nccl/src/transport/shm.cc#L467) 的 NULL progress 反查：为什么资源 service 存在，却不能推导 CPU 逐片搬运 payload？
+
+有 GPU 再按第 10 节核对实际路径、日志和 timeline；源码推演不是实测，日志与性能也不能单独证明所有内存序正确。
+
+主线下一步：[08 Host execution](08-host-execution.md)，看 NCCL 如何为这些连接与执行者生成 task、plan 和工作描述；精确的逐片协议条件随后在第 09 章核查。

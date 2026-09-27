@@ -3,7 +3,9 @@
 > 基线：NCCL `12df1a11`，版本 `2.32.3`。
 > 本章以传统通用集合 kernel 为主，不把 symmetric kernel、Device API 或 CE 混成默认实现。
 > 编写环境为无 GPU 的 macOS；下文源码推演不是 CUDA 实测。
-> 前置：[主机提交](05-host-execution.md)、[传输](07-transports.md)、[集合算法](08-algorithms.md)。
+> 本章承接 [08 主机提交](08-host-execution.md)，结合已读的 [07 传输](07-transports.md)与 [04 集合算法核心](04-algorithms.md)，进入设备执行。
+> **推荐学习方式：机制 → 源码 → 实验。** 用熟悉的 producer/consumer 队列与 fence 理解连接 FIFO，再沿角色追源码。
+> 基础数组说明可回查 [01](01-mental-model.md) / [02](02-collectives.md)，无需从 malloc/for 重学 GPU。
 
 ## 9.1 学习目标
 
@@ -54,12 +56,25 @@ primitives.h::Primitives<T, RedOp, Fan, Direct, Proto, ...>
 | channel | NCCL 的逻辑通信通道，含拓扑和 peer 连接 | 不是网卡端口，也不是 CUDA stream |
 | chunk | 算法本轮交给 primitive 的逻辑数据块 | 不一定等于整次用户数组的 S/P |
 | slice | primitive 内可独立流水推进的数据片 | 大小会受协议、尾块和参数影响 |
-| step | 连接进度计数及 FIFO 配额单位 | 不是上一章全环的一轮，也不是 kernel 次数 |
+| step | 连接进度计数及 FIFO 配额单位 | 不是第 04 章全环的一轮，也不是 kernel 次数 |
 
 本通用入口中，一个 CTA 在一次 launch 内映射到一个活动 channel；其驻留 SM 与调度时间仍由 CUDA 硬件决定。
 一个 channel 可含树的多个 peer，多个 channel 也可争用同一物理 NVLink/NIC；CTA 内又可拆分角色，故没有“一 warp 一链路”规则。
 [src/include/device.h:337，`ncclCollCbdPart`](../nccl/src/include/device.h#L337) 计算 channel 的范围与 chunk 数，供 `runRing` 确定实际数组偏移。
-大数组会循环处理多波 chunk，尾波还会重新对齐 chunkCount；因此 S/P 只是前章的等分单波模型。
+大数组会循环处理多波 chunk，尾波还会重新对齐 chunkCount；因此 S/P 只是第 04 章的等分单波模型。
+
+### 从数组元素找到 channel：两通道教学例子
+
+假设四个 ranks 各有 16 个元素，一次 Ring AllReduce 恰好由两个 channel 均分，每个 channel 在一波中把自己负责的 8 个元素分成四块、每块 2 个元素。这里只固定一个便于手算的调度，不声称 16 元素的真实调用会使用两个 channel；区间均为左闭右开，索引是元素而非字节。
+
+| channel | 负责的用户数组区间 | 局部 C0 | 局部 C1 | 局部 C2 | 局部 C3 |
+|---|---|---|---|---|---|
+| 0 | `[0,8)` | `[0,2)` | `[2,4)` | `[4,6)` | `[6,8)` |
+| 1 | `[8,16)` | `[8,10)` | `[10,12)` | `[12,14)` | `[14,16)` |
+
+用户数组的元素 11 属于 channel 1：减去区间起点 8 得局部偏移 3，即局部 C1 的第 2 个元素。四个 ranks 对这个元素的贡献在 channel 1 的 Ring 中规约、传播，最终各 rank 的输出仍位于用户数组索引 11；不是只有 rank 1 获得它。
+
+两个 channel 分担不同元素，但各自都包含参与通信的 ranks；每个 channel 的环次序也可以不同。实际分区可能不均匀、有多波和尾部，须读取 work 与 `ncclCollCbdPart` 的输出，不能把“每 channel 都处理整个用户数组的 S/P”当成通式。
 
 ### 一个单位换算例子
 
@@ -82,12 +97,18 @@ ProtoSimple<SlicePerChunk=2, StepPerSlice=2>
 
 主机提交的 work FIFO/参数空间保存“做什么”的描述，例如缓冲区、范围和 funcId。
 连接数据 FIFO 保存传输中的数据或相关进度，服务于“对端已经写到了哪里”。
-前者的回收不等于用户数据完成；后者的一次确认也不等于整个集合已经完成。
+主机 task/plan 的回收不等于通信完成；本版普通非捕获路径的 work FIFO 则在主机确认对应 launch stream 完成事件之后返还容量，不能与主机描述的提前回收混为一谈，详见 [08 第 6 节](08-host-execution.md#6-cpu-与-gpu-交接的是-work-descriptor不是-c-planner)。
+连接数据 FIFO 的单片确认仍不等于整个集合完成；本地完成也不是所有 ranks 的全局完成通知。
 
 连接结构见 [src/include/device.h:136，`ncclConnInfo`](../nccl/src/include/device.h#L136)：
 `buffs[proto]` 是协议缓冲，`head/tail` 是进度位置，`step` 保存本地连接进度。
 此外还有 direct 指针交换、网络句柄及 `connFifo` 元数据，不能把它们都理解为 payload。
 注释中的 local/remote 是相对于该连接端点而言；NET 的另一端可能是代理，而非另一 GPU 的直接内存。
+
+借熟悉的 UMD 队列来问两件事：producer 能否占用空间，consumer 能否读取数据？这是协议类比，不是同一个实现对象。
+逻辑 step 像持续推进的序号，物理 slot 只是循环使用的存储位置；地址相同并不表示属于同一代。
+**credit/head 保护尚未消费的数据不被覆盖；tail/flag 保护尚未就绪的数据不被读取。** 两种许可不能互相替代。
+NET 中还要把“消费”限定到当前 FIFO：发送侧的 consumer 是网络发送流程，接收侧的 consumer 才是接收 GPU。
 
 ```text
 逻辑 step:  ... 6  7  8  9 10 11 ...      （持续增长）
@@ -128,10 +149,17 @@ WaitSend -> conn->head       PostSend -> conn->tail
 进度会在构造时按 chunk 配额对齐，在析构时写回 `conn->step`，不是每次调用都从零开始。
 见 [src/device/prims_simple.h:485、787，连接加载与 `~Primitives`](../nccl/src/device/prims_simple.h#L787)。
 
+承接 9.3 的 `NCCL_STEPS=8 / StepPerSlice=2`，上例一个 slice 消耗两 steps 配额，不能把“8 槽”直接读成“8 个这样的 slice”。
+后面的纸上追踪沿用这个单位；所有 head/tail 比较先对齐逻辑 step，再用 `%8` 找物理位置，不再另画一套流水。
+
 ## 9.6 有通知还不够：数据必须先可见
 
 错误顺序非常直观：发送者先更新 tail，后写数据；接收者见 tail 已到便读出了旧值。
 正确协议要保证**数据/元数据先发布，完成信息后发布**，并使用匹配的读取方式。
+
+这里 fence 类比的是访存 ordering（先后约束），不是 UMD 中某个“作业已完成”的 fence 对象，名字相同不等于语义相同。
+fence 不会凭空让 peer 到达、让 FIFO 出现空间，或让整个输出完成；这些分别依赖对端推进、消费反馈和完整计算依赖链。
+所以 `waitPeer` 的条件轮询不能由一次 fence 替换，CTA 内 `__syncthreads` 也不能替换跨 GPU 的 ready/credit 协议。
 
 ```text
 发送侧                         接收侧
@@ -265,6 +293,10 @@ NET 路径上，GPU、CPU proxy 和 NIC 可以共同推进不同阶段。
 接收侧 [第 1707–1734 行](../nccl/src/transport/net.cc#L1707) 展示条件式 flush 与发布接收进度。
 GPU 等待时间变长可能是网络/代理进展受阻，不一定是 GPU 规约指令太慢。
 
+普通 NET 要分开两条本地交接：发送 GPU ↔ send proxy、recv proxy ↔ 接收 GPU，并非两端共用一个 head/tail。
+发送侧 `test` 完成可返还发送缓冲信用；接收侧网络完成加必要可见性处理才发布 tail，GPU 消费后才发布 head。
+硬件/网络完成、协议消费、应用使用输出是不同边界；接收 head 前进也不证明整个 AllReduce 输出已经完成。
+
 ## 9.12 选择协议也是选择资源占用
 
 Simple 适合摊薄大片数据的控制成本；LL 常以标志流量换小消息更早启动；LL128 改善数据比例，但有 warp 协作、寄存器与 scratch 成本。
@@ -286,7 +318,59 @@ Simple 适合摊薄大片数据的控制成本；LL 常以标志流量换小消�
 在设备自旋循环加 printf 会严重扰动时序，不能把它测出的时间当作真实性能。
 有限时间等待和异步错误检查也应保留；背压保障无覆盖，并不保障失效 peer 最终一定前进。
 
-## 9.14 自测与答案
+## 9.14 无 GPU 状态追踪：一片数据的四个交接字段
+
+在纸上推演普通 NET/Simple 的非 shared、非用户 buffer 注册、非 GDC 路径（不取 `gdcSync/gdcFlush` 分支）；不改源码、不做故障注入。
+沿用 9.5 的 `NCCL_STEPS=8、StepPerSlice=2`，令两端 proxy 的 `sliceSteps=2、base=0`，初始两端 head/tail 都为 0。
+四个交接字段属于两套本地缓冲，不能合并成一条全局进度：
+
+| 字段 | 谁写 → 谁读 | 发布的含义 |
+| --- | --- | --- |
+| `S_tail` | 发送 GPU `PostSend` → send proxy | GPU 已准备好发送数据 |
+| `S_head` | send proxy → 发送 GPU `WaitSend` | 网络发送完成后的本地信用 |
+| `R_tail` | recv proxy → 接收 GPU `WaitRecv` | 网络完成且必要可见性处理结束，数据可供 GPU 读取 |
+| `R_head` | 接收 GPU `PostRecv` → recv proxy | GPU 已消费的接收信用；proxy 观察后推进接收侧 `done` |
+
+为读懂下表，把两端各自的 `sub` 记为 `S`、`R`。**proxy 进度是相对本次操作的 step 计数，四个 head/tail 则是连接上的绝对 step；换算为 `绝对 step = 本端 base + 本端相对进度`。** 本例 base 都为 0，数值碰巧相同，不代表它们是同一个变量。
+
+- 发送列依次为 `(S.posted, S.transmitted, S.done)`：已纳入发送窗口、`isend` 已受理、发送 `test` 已完成的进度。非 shared 路径的 `S.posted` 只是 proxy 记账，不发布 `S_head`，也不表示 GPU 已写好。
+- 接收列依次为 `(R.posted, R.received, R.transmitted, R.done)`：`irecv` 已受理、接收 `test` 已完成、必要可见性处理后交给 GPU、proxy 已确认 GPU 消费的进度。这里的 `R.transmitted` **不是网络发送**，`R.done` 也不是接收 `test` 的完成标志。
+
+只追第一片非空 slice：它从绝对 step 0 推进到 2，payload 起点是各自 FIFO 的 slot `0%8=0`，占两 steps 配额。取两端各 `nsubs=1、nsteps=16`；窗口上限按 `maxDepth=min(NCCL_STEPS, NCCL_SHARED_STEPS/nsubs)` 计算。本版 `NCCL_STEPS=8`、`NCCL_SHARED_STEPS=16`，所以 `maxDepth=min(8,16/1)=8`。这里的常量 16 与本例操作总步数 `nsteps=16` 只是数值相同，窗口上限不是由 `nsteps` 算出的；定义和计算见 [net.cc:665](../nccl/src/transport/net.cc#L665)、[1343](../nccl/src/transport/net.cc#L1343)。
+
+先把 8 steps 的窗口投满，再追这片 payload。当前窗口的其他三片只准备了缓冲，GPU 暂不发布其数据，后半操作仍等待空位；**一个 slice 是两 steps，不是整个操作或整个 chunk。**
+
+下表每行是所述动作后的状态；窗口准备行合并了 `posted` 按 `0→2→4→6→8` 推进的多次调用。发送和接收可交叠，**这只是一个可行时序，不是两端全局串行的保证**。接收可见性部分选取需要异步 `iflush` 的情况；非 GDC 不等于非 GDR，无需 flush 时跳过等待即可。
+
+| 动作与交接条件 | 发送相对进度 `(posted, transmitted, done)` | 接收相对进度 `(posted, received, transmitted, done)` | `S_head` | `S_tail` | `R_head` | `R_tail` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 初始化；发送 FIFO 的 size 尚为 `-1` | `(0,0,0)` | `(0,0,0,0)` | 0 | 0 | 0 | 0 |
+| 接收窗口已投递：各次 `irecv` 返回非空 request；send proxy 也完成窗口记账。接收已投递不等于收到数据 | `(8,0,0)` | `(8,0,0,0)` | 0 | 0 | 0 | 0 |
+| 发送 GPU 通过 `S_head+8>=0+2` 的信用检查，在 `waitPeer` 先写 `connFifo[0].size`；payload 尚未发布。size 非 `-1` **仍需 tail**，此时不能发送 | `(8,0,0)` | `(8,0,0,0)` | 0 | 0 | 0 | 0 |
+| GPU 写完 payload，经线程组 barrier、系统 fence，再由 `PostSend` 发布 `S_tail=0+2` | `(8,0,0)` | `(8,0,0,0)` | 0 | 2 | 0 | 0 |
+| send proxy 见 size 有效且 `S_tail>S.base+S.transmitted`，尝试 `isend`，但 request 为空：**未受理**，进度不动，稍后重试 | `(8,0,0)` | `(8,0,0,0)` | 0 | 2 | 0 | 0 |
+| 再次 `isend` 返回非空 request，才将 `S.transmitted` 加 2；受理尚不等于发送完成 | `(8,2,0)` | `(8,0,0,0)` | 0 | 2 | 0 | 0 |
+| 发送 `test` 完成：先将 size 重置为 `-1`，经 CPU `seq_cst` fence，再推进 `S.done` 并发布 `S_head=S.base+S.done=2` | `(8,2,2)` | `(8,0,0,0)` | 2 | 2 | 0 | 0 |
+| 接收 `test` 完成，`R.received` 加 2；本例非空且 `useGdr && needFlush`，调用 `iflush` 并取得待完成 request。GPU 尚不可读 | `(8,2,2)` | `(8,2,0,0)` | 2 | 2 | 0 | 0 |
+| flush request 的 `test` 完成（未完成就保持上一行）；`R.transmitted` 加 2，经 CPU `seq_cst` fence 发布 `R_tail=R.base+R.transmitted=2` | `(8,2,2)` | `(8,2,2,0)` | 2 | 2 | 0 | 2 |
+| 接收 GPU 见 `R_tail>=0+2`，读取、处理本片，线程组确认消费结束后由 `PostRecv` 发布 `R_head=2` | `(8,2,2)` | `(8,2,2,0)` | 2 | 2 | 2 | 2 |
+| recv proxy 观察到 `R_head>R.base+R.done`，且 `R.transmitted>R.done`，才推进 `R.done`（如插件提供，还调用 `irecvConsumed`） | `(8,2,2)` | `(8,2,2,2)` | 2 | 2 | 2 | 2 |
+
+**`S_head=2` 不能推出 `R_head=2`。** 前者归还发送缓冲的信用；后者要等接收 GPU 实际消费，recv proxy 看到它才回收接收窗口。表中发送 `test` 先被观察到，不要求接收侧也按此顺序推进；即使 `R_tail=2`，只要 `R_head=0`，也只能说数据可读，不能说已消费。最后一行也仅完成了第一片的交接，不表示整个 AllReduce 输出可供应用使用。
+
+窗口背压同样分两端计算：允许继续投递须满足本端 `posted<nsteps` 且 **`posted<done+maxDepth`**。本例还有工作（`8<16`），但接收窗口已满，`R.done=0` 时 `8<0+8` 不成立；仅提高 `R.received` 或 `R.transmitted` 不会腾出窗口。GPU 消费且 proxy 将 `R.done` 推进到 2 后，下一次投递才获得空间（`8<2+8`），可把 `R.posted` 推进到 10。发送窗口则由自己的 `S.done` 归还配额。慢接收 GPU 因而能堵住后续接收投递，再沿网络向发送端传递背压；发送侧先释放一片不等于消除了这条依赖。
+
+### 表后源码核查入口
+
+- [net.cc：`sendProxyProgress`](../nccl/src/transport/net.cc#L1324)：核查窗口优先投递、size 与 tail 的双条件、非空 `isend` request，以及发送完成时“清 size → fence → 发布 head”的顺序。
+- [net.cc：`recvProxyProgress`](../nccl/src/transport/net.cc#L1493)：核查 `irecv → test → 必要 iflush → 发布 tail → 观察 head`。需要 flush 时，接收完成还不够；没有 flush request 则无需再 `test`，有 request 必须等完成。GDC 的同步映射写及 WC fence、flush 的 x86/非 x86 实现是另行核查的分支，不套进本表。
+- [prims_simple.h：`loadStepValue` 起](../nccl/src/device/prims_simple.h#L86)：同文件 `loadRecvConn/loadSendConn` 绑定四个角色；`waitPeer` 先写 size，`genericOp` 的 barrier 后才 `postPeer`。普通进度读取用 volatile PTX；NVLS min polling 在 `__CUDA_ARCH__>=900 && CUDART_VERSION>=12010` 下另走 acquire.sys multimem 分支，不是本表的 NET 读取。
+- [common_kernel.h：`reduceCopyPacks` 的配套读取](../nccl/src/device/common_kernel.h#L94)与 [op128.h：PTX 访存/屏障封装](../nccl/src/device/op128.h#L342)：volatile 进度轮询要配合 volatile payload 读取，避免陈旧 L1。`st_relaxed_sys_global` 在 `__CUDA_ARCH__>=700` 用 `st.relaxed.sys.global`，旧架构用 `st.volatile.global`；`fence_acq_rel_sys` 分别用 `fence.acq_rel.sys` / `membar.sys`。不能孤立看 relaxed store，也不能将整套协议改写成通用 C++ acquire/release 证明。
+
+有 GPU 后，只在合法配置下核对日志中的 transport/协议与 timeline 的 kernel、CPU proxy 活动；日志没有显示某个 step，不等于它不存在。
+日志、timeline 和性能对照能提供进度线索，不能单独证明所有内存序正确；本节没有执行 GPU 实验或故障注入。
+
+## 9.15 自测与答案
 
 **题 1：NCCL_STEPS=8，发送 step=8、StepPerSlice=2、head=1，可否继续？**
 答：不可以，`1+8<8+2`；至少要 head 达到 2，才能安全重用对应空间。
@@ -296,3 +380,5 @@ Simple 适合摊薄大片数据的控制成本；LL 常以标志流量换小消�
 
 **题 3：为何不能只用 __syncthreads，或者只看 directSend 的名字来判断传输正确性？**
 答：CTA barrier 不完成跨 GPU 发布；还需协议的可见性和流控。Direct 是原语接口能力，是否走直接缓冲取决于协议和连接条件。
+
+**下一站：[10 nccl-tests](10-nccl-tests.md)。** 将本章的就绪、完成与背压机制转成受控验证，再进入 11 的性能分析。
