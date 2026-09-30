@@ -2,15 +2,15 @@
 
 ## 学习目标
 
-- 用文件、符号和状态流定位问题，而不是从头逐行读完整仓库。
+- 用文件、符号和状态流定位问题，而不是从头逐行读完整个仓库。
 - 分清公共契约、当前实现和教学模型的证据强度。
 - 建立一个能随版本变化而更新的阅读方法。
 
 ## 随主线使用：从 UMD 的状态追踪方法入手
 
-本章可随 01～12 主线查阅，不必等读完 13：读 05 配初始化任务，读 06 配拓扑任务，读 08 配 API/提交任务，读 09 配设备原语任务，读 10 配测试任务。算法手算与 transport 追踪分别随第 04、07 章进行，不要求先补完基础带练。
+本章回答一个问题：拿到一个 NCCL 问题，先翻哪个文件、追哪个符号？全章是一张模块地图加六次阅读任务，可随 01～12 主线查阅，不必等读完 13：读 05 配初始化任务，读 06 配拓扑任务，读 08 配 API/提交任务，读 09 配设备原语任务，读 10 配测试任务。算法手算与 transport 追踪分别随第 04、07 章进行，不要求先补完基础带练。
 
-你可以沿用驱动调试中追“资源—命令—完成”的方法，但把跨 rank 的依赖一起记下。每到一个关键状态，填四项：
+追 NCCL 源码，可以沿用驱动调试里追“资源—命令—完成”的方法，只多一件事：把跨 rank 的依赖一起记下。每到一个关键状态，填四项：
 
 | 状态或对象 | 谁生产/更新 | 谁消费/等待 | 哪个条件允许继续或复用 |
 |---|---|---|---|
@@ -19,11 +19,13 @@
 | 一条 transport 连接 | 两端 setup/connect 及服务逻辑 | kernel 或 proxy | 所需 handle、映射、注册与连接状态已就绪 |
 | 一片数据的 ready/credit | GPU、proxy 或网络完成路径，视连接而定 | 下游消费者或上游生产者 | ready 防止读未发布数据，credit 防止覆盖未消费数据 |
 
-表是定位问题的模板，不是按行顺序执行的调用栈；尤其最后一行必须进入具体协议分支，不能用一个抽象的“完成”包办。
-
-**一次最小追踪的交付：**选普通 host API AllReduce，记录 `comm、输入输出范围、rank/channel、所走分支`；从一个工作描述追到一个 primitive，再说明它等待哪个 peer 状态。数据量与控制描述分别画，不把 plan 画成用户 payload，也不把 work FIFO 当硬件提交队列。
+**一次最小追踪的交付：**选普通 host API AllReduce，记录 `comm、输入输出范围、rank/channel、所走分支`。从一个工作描述追到一个 primitive，再说明它等待哪个 peer 状态。数据量与控制描述分开画。
 
 用证据约束结论：源码告诉你当前分支如何组织，日志帮助确认实际选路，CUDA 时间线显示执行/等待关系，正确性检查验证当前用例输出。若没有对应运行环境，就交付源码与纸面推导，并把尚待实验确认的选择、延迟和吞吐单独列出。
+
+**注意：**
+- 上表是定位问题的模板，不是按行顺序执行的调用栈。最后一行必须进入具体协议分支，不能用一个抽象的“完成”包办。
+- 不把 plan 画成用户 payload，也不把 work FIFO 当硬件提交队列。
 
 ## 1. 先确认你正在读哪一版
 
@@ -32,9 +34,13 @@ git -C nccl rev-parse HEAD
 git -C nccl-tests rev-parse HEAD
 ```
 
-本教材基线见[首页](README.md)。文件链接是相对于教材目录的；行号写成 `nccl/src/collectives.cc:192`，指原始仓库文件，不是 Markdown 页内行号。
+行号只对特定版本有效，动手前先确认基线。本教材基线见[首页](README.md)。文件链接相对于教材目录；行号写成 `nccl/src/collectives.cc:192`，指原始仓库文件，不是 Markdown 页内行号。
+
+<details><summary>深入：版本变了，行号对不上怎么办</summary>
 
 更新版本后，应搜索函数名重新定位，不能根据行号硬套。2.32.3 已经把很多 enqueue/tuning 实现拆到子目录，旧教程中的 `src/enqueue.cc` 或 `src/graph/tuning.cc` 不一定是当前路径。
+
+</details>
 
 ## 2. 按问题找目录
 
@@ -63,43 +69,45 @@ git -C nccl-tests rev-parse HEAD
 | 测试主体 | [nccl-tests/src/common.cu](../nccl-tests/src/common.cu) | rank映射、预热、计时、校验 |
 | 某操作测试定义 | [nccl-tests/src/all_reduce.cu](../nccl-tests/src/all_reduce.cu) | count、执行、带宽归一化 |
 
-这是导航图，不是说“所有路径都会经过表里每一行”。例如 device API、CE 和普通 host collective 的关键工作路径不同。
+**注意：**这是导航图，不是说“所有路径都会经过表里每一行”。device API、CE 和普通 host collective 的关键工作路径不同。
 
 ## 3. 第一次阅读：只追一个 API 的参数
 
-起点：`nccl/src/nccl.h.in:602` 的 `ncclAllReduce`。
+任务：弄清一次 `ncclAllReduce` 调用的参数去了哪里，其余先不看。起点：`nccl/src/nccl.h.in:602` 的 `ncclAllReduce`。接着看 `nccl/src/collectives.cc:192` 的 `ncclAllReduceConfigImpl`，再到 `nccl/src/enqueue/enqueue.cc:3478` 的 `ncclEnqueueCheck`。
 
-接着看 `nccl/src/collectives.cc:192` 的 `ncclAllReduceConfigImpl`，再到 `nccl/src/enqueue/enqueue.cc:3478` 的 `ncclEnqueueCheck`。
-
-只回答：
+只回答三个问题：
 
 - count、datatype、op、stream、comm 被放进什么结构？
 - 参数检查是在 host 层完成，还是留给后续工作？
 - 为什么公共函数本身没有循环读每一个数组元素？
 
-完成标准：你能画出 `API参数 -> ncclInfo -> 后续任务`，知道规约不发生在这个薄封装里。
+**完成标准：**能画出 `API参数 -> ncclInfo -> 后续任务`，知道规约不发生在这个薄封装里。
+
+<details><summary>深入：这次故意跳过的内容</summary>
 
 不要第一次就展开每个 `NCCLCHECK`、NVTX 宏、模板和 allocator。它们很重要，但不是这次问题的主因果链。
 
+</details>
+
 ## 4. 第二次阅读：找到“从收集到执行”的边界
 
-看 `nccl/src/group.cc:1031` 的 `groupLaunch`，注意它在当前版本存在不同路径。再看：
+任务：分清“group 内收集调用”与“kernel 真正启动”之间的边界。看 `nccl/src/group.cc:1031` 的 `groupLaunch`，注意它在当前版本存在不同路径。再看：
 
 - `nccl/src/enqueue/enqueue.cc:1695`，`ncclLaunchPrepare`。
 - `nccl/src/enqueue/enqueue.cc:1886`，`ncclLaunchKernel`。
 
-回答：
+回答四个问题：
 
 1. group 内调用为什么不能直接等同于已启动 kernel？
 2. 谁持有 task，谁生成 plan，谁消费 plan？
 3. proxy 操作与 GPU work 描述如何关联？
 4. 当前走哪条分支，判断条件来自哪里？
 
-完成标准：用[第 08 章](08-host-execution.md)的模型解释一个具体调用，不把所有函数名拼成一条没有分支的假调用栈。
+**完成标准：**用[第 08 章](08-host-execution.md)的模型解释一个具体调用，不把所有函数名拼成一条没有分支的假调用栈。
 
 ## 5. 第三次阅读：只理解一次初始化
 
-看 `nccl/src/init.cc:2105` 的 `ncclCommInitRankFunc`，把本 rank 建立起来之前缺失的信息列出来：
+任务：弄清建立一个 communicator 时，补齐了哪些此前缺失的信息。看 `nccl/src/init.cc:2105` 的 `ncclCommInitRankFunc`，把本 rank 建立起来之前缺失的信息列出来：
 
 ```text
 我是谁 -> 谁与我同机 -> 哪些GPU/NIC可达 -> 用什么连接 -> 如何让双方使用连接
@@ -109,23 +117,23 @@ git -C nccl-tests rev-parse HEAD
 
 关键区分：bootstrap 交换元数据和引导信息，后续 transport 才决定大块 GPU payload 如何前进。初始化并不是 CPU 把未来的所有 tensor 都分发一遍。
 
-完成标准：解释 uniqueId 为什么需要分发、comm 指针为什么不能跨进程直接使用、为什么首次 collective 仍可能有额外连接开销。
+**完成标准：**解释 uniqueId 为什么需要分发、comm 指针为什么不能跨进程直接使用、为什么首次 collective 仍可能有额外连接开销。
 
 ## 6. 第四次阅读：硬件图为什么变成那条 ring
 
-顺序：
+任务：弄清拓扑图怎样变成一条具体的 ring。按顺序读：
 
 1. `nccl/src/graph/topo.cc:1989`，`ncclTopoGetSystem`。
 2. `nccl/src/graph/paths.cc:754`，`ncclTopoComputePaths`。
 3. `nccl/src/graph/search.cc:1151`，`ncclTopoCompute`。
 
-先在纸上画出两 CPU socket、四 GPU、两 NIC 的简图，再找代码如何表示节点/链路/路径。
+先在纸上画出两 CPU socket、四 GPU、两 NIC 的简图，再找代码如何表示节点、链路和路径。
 
-完成标准：解释为什么 r0→r1→r2→r3 只是一个教学顺序，实际 ring 要考虑连接与资源；解释为什么图搜索与每次调用的算法选择是有关联但不同的问题。
+**完成标准：**解释为什么 r0→r1→r2→r3 只是一个教学顺序，实际 ring 要考虑连接与资源；解释为什么图搜索与每次调用的算法选择是有关联但不同的问题。
 
 ## 7. 第五次阅读：一个块穿过 device 原语
 
-打开 [all_reduce.h](../nccl/src/device/all_reduce.h)，从 Ring 的一个收发/规约步骤出发；再去 [primitives.h](../nccl/src/device/primitives.h) 和具体 `prims_*.h` 查对应实现。
+任务：跟一个数据块走完 device 侧的一步收发与规约。打开 [all_reduce.h](../nccl/src/device/all_reduce.h)，从 Ring 的一个收发/规约步骤出发；再去 [primitives.h](../nccl/src/device/primitives.h) 和具体 `prims_*.h` 查对应实现。
 
 记录四个信息：
 
@@ -136,27 +144,29 @@ git -C nccl-tests rev-parse HEAD
 | 写哪里 | 下游缓冲、用户输出或两者 |
 | 何时可前进 | 数据就绪标志、step、空间和线程同步 |
 
-完成标准：能解释“接收并规约再发送”为什么可以融合，为什么必须防止接收者读到尚未完成的数据，以及生产者覆盖尚未消费的槽位。
+**完成标准：**能解释“接收并规约再发送”为什么可以融合，为什么必须防止接收者读到尚未完成的数据，以及生产者覆盖尚未消费的槽位。
 
 ## 8. 第六次阅读：亲自证明一个测试列的含义
 
-从 `nccl-tests/src/all_reduce.cu:54` 附近的 `AllReduceGetBw` 入手，结合 [PERFORMANCE.md](../nccl-tests/doc/PERFORMANCE.md) 检查带宽定义；再读 `common.cu` 的运行循环。
+任务：亲手算出测试输出里带宽列的含义，而不是只会照着念。从 `nccl-tests/src/all_reduce.cu:54` 附近的 `AllReduceGetBw` 入手，结合 [PERFORMANCE.md](../nccl-tests/doc/PERFORMANCE.md) 检查带宽定义；再读 `common.cu` 的运行循环。
 
 不要止步于“打印了 algbw”：继续追 `count`、类型字节数、计时区间、迭代归一化和 rank 聚合。
 
-完成标准：能够拿 `P=4, S=64MiB, T=2ms` 手算两种带宽，并说明它们为什么不是直接读取 NIC 计数器的结果。
+**完成标准：**能够拿 `P=4, S=64MiB, T=2ms` 手算两种带宽，并说明它们为什么不是直接读取 NIC 计数器的结果。
 
 ## 9. 如何做最小源码实验
 
-建议先保留上游基线，单独建立自己的实验分支或副本；教材不会自动改动上游仓库。
+本节回答：想动手验证一个判断，怎样改动最小、结论最可信？
 
-一次只做一个观察：
+先保留上游基线，单独建立自己的实验分支或副本；教材不会自动改动上游仓库。一次只做一个观察：
 
 - 在已确认的 host 决策点记录选择，检查日志与参数是否一致。
 - 改一个输入规模，观察候选或通道安排是否变化。
 - 用同一 workload 对比 release 与带观测的构建，确认日志没有显著扰动结论。
 
-不要在高频 device 循环里大量打印后，再把慢下来的结果当成原始性能。也不要删同步、强制关闭错误检查来“让测试不挂”，那可能只是隐藏了前进性或可见性错误。
+**注意：**
+- 不要在高频 device 循环里大量打印后，再把慢下来的结果当成原始性能。
+- 不要删同步、强制关闭错误检查来“让测试不挂”，那可能只是隐藏了前进性或可见性错误。
 
 ## 10. 术语速查
 

@@ -4,23 +4,23 @@
 
 ## 机制检查站：CUDA/UMD 读者的推荐入口
 
-不用先重做数组和指针练习，也不用按题号一次做完：读 04 核心配 B1/B2；读 05/06/07 配 D3；读 08 配 M1/M2，再用 D2 验证批处理；读 09 配 M3/M4；读 10/11 配 M5。写清状态、执行者、前进条件，再给源码或观测依据；题目均可先做纸面分析，有 GPU 时再做自己的受控验证。
+这一组检查的是机制理解，不用先重做数组和指针练习，也不用按题号一次做完：读 04 核心配 B1/B2；读 05/06/07 配 D3；读 08 配 M1/M2，再用 D2 验证批处理；读 09 配 M3/M4；读 10/11 配 M5。答题先写清状态、执行者、前进条件，再给源码或观测依据。所有题目均可先做纸面分析，有 GPU 时再做自己的受控验证。
 
 ### M1. 本地提交完成了，为什么通信仍可能不动？
 
-假设本 rank 输入已就绪、NCCL kernel 已 launch，但 stream 迟迟不完成。列出三类仍未满足的跨参与者条件，并说明你会分别查哪份证据。为什么再向同一 stream 排一个同步/等待不能补齐缺席 rank 的操作？
+假设本 rank 输入已就绪、NCCL kernel 已 launch，但 stream 迟迟不完成。列出三类仍未满足的跨参与者条件，并说明每类分别查哪份证据。再回答：为什么向同一 stream 多排一个同步/等待，不能补齐缺席 rank 的操作？
 
 入口：[03 的跨 rank 等待图](03-cuda-semantics.md)、[08 的 work/proxy 两路推进](08-host-execution.md)、[12 的分层诊断](12-debugging.md)。
 
 ### M2. 将一次 API 请求追到设备，但不把对象画错
 
-从 `ncclAllReduceConfigImpl` 开始，标出临时 `ncclInfo`、较长寿命的 task、kernel plan、GPU work descriptor 各由谁持有/消费。解释它们为什么不是同一个硬件 command buffer，以及 host API 返回后用户缓冲为何仍必须有效。
+从 `ncclAllReduceConfigImpl` 开始，标出四类对象各由谁持有、谁消费：临时 `ncclInfo`、较长寿命的 task、kernel plan、GPU work descriptor。再解释两点：它们为什么不是同一个硬件 command buffer；host API 返回后，用户缓冲为何仍必须有效。
 
 入口：[08](08-host-execution.md)、[14 的状态追踪模板](14-source-map.md)。验收不是函数名列表，而是一张生产者/消费者/寿命表。
 
 ### M3. 地址可访问、MR 已注册、请求完成分别证明什么？
 
-对普通 NET/GDR 路径，依次讨论：CUDA 允许 GPU 访问某映射；网络已为该范围建立 MR（memory region，注册内存区域）；某个网络 request 被确认完成；整个 collective 输出已可消费。为什么前三项不能任意替代最后一项？在非用户 buffer 直接注册路径中，协议 FIFO 的消费反馈与应用输出缓冲的复用依赖分别由谁管理？
+对普通 NET/GDR 路径，依次讨论四种状态：CUDA 允许 GPU 访问某映射；网络已为该范围建立 MR（memory region，注册内存区域）；某个网络 request 被确认完成；整个 collective 输出已可消费。为什么前三项不能任意替代最后一项？在非用户 buffer 直接注册路径中，协议 FIFO 的消费反馈与应用输出缓冲的复用依赖，分别由谁管理？
 
 入口：[07 的连接与注册](07-transports.md)、[09 的数据发布与背压](09-device-protocols.md)。先明确“哪一端、哪一片、哪种完成”，不预设 request 对应整个用户数组。
 
@@ -32,7 +32,7 @@
 
 ### M5. 让一个性能解释可以被验证或推翻
 
-假设增加 channel/CTA 后，通信独跑更快，但与计算重叠的端到端耗时更长。列出要固定的变量和至少两类需要收集的时间线/计数证据；为什么只比较 `Avg bus bandwidth` 不足以决定保留改动？
+假设增加 channel/CTA 后，通信独跑更快，但与计算重叠的端到端耗时更长。列出要固定的变量，以及至少两类需要收集的时间线/计数证据。为什么只比较 `Avg bus bandwidth` 不足以决定保留改动？
 
 入口：[10 的计时与数据量](10-nccl-tests.md)、[11 的资源竞争](11-performance.md)、[16 的关键路径](16-training-integration.md)。无需预设你懂训练框架，先以一个 producer→通信→consumer 依赖图分析。
 
@@ -210,7 +210,7 @@ python3 nccl-tutorial/examples/ring_simulator.py --self-test
 
 ### D2. 验证两次调用是否会合成一次发射
 
-在 M2 已追清单个请求生命周期的基础上，比较“一个 group 内提交两次独立 AllReduce”和“分别提交”。假设每个 rank 的两次操作顺序一致、尺寸/类型/规约相同、使用同一 stream，各次输入输出缓冲互不重叠；选普通非捕获路径，连接已通过预热建立。
+在 M2 已追清单个请求生命周期的基础上，比较“一个 group 内提交两次独立 AllReduce”和“分别提交”。先固定前提：每个 rank 的两次操作顺序一致、尺寸/类型/规约相同、使用同一 stream，各次输入输出缓冲互不重叠；选普通非捕获路径，连接已通过预热建立。
 
 先沿 task 聚合与 plan 打包源码，找出兼容性及参数/work 存储预算怎样允许合并或迫使拆分。若有 GPU，再用自己的受控实验记录两种组织方式的实际 plan/kernel 发射数量及输出正确性；没有 GPU 就给出分支条件，不能把推断写成观测值。
 

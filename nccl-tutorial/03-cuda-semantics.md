@@ -2,11 +2,11 @@
 
 ## 学习目标与阅读顺序
 
-**CUDA/UMD 读者主线：**快速检查 1.3 的完成语义，重点读第 2 节 group、第 4 节跨 rank 匹配、第 5 节异步错误及第 7 节多 stream 依赖。第 1 节的复制/分配基础和第 3 节的通用生命周期可作速查；第 8 节非阻塞 communicator 按管理需求深入，但要先分清它与 CUDA stream 属性不是同一个开关。
+**CUDA/UMD 读者主线：**快速检查 1.3 的完成语义。重点读第 2 节 group、第 4 节跨 rank 匹配、第 5 节异步错误和第 7 节多 stream 依赖。第 1 节的复制/分配基础和第 3 节的通用生命周期可作速查。第 8 节非阻塞 communicator 按管理需求深入；先记住一点：它与 CUDA stream 属性不是同一个开关。
 
 ## 从本地依赖图到分布式前进条件
 
-熟悉 UMD 提交的人通常会先问“依赖是否满足、命令是否已提交、完成通知在哪里”。NCCL 还多一个问题：**对端是否进入同一轮操作，并持续提供数据或返还可复用空间？**
+熟悉 UMD 提交的人通常会先问三个问题：依赖是否满足？命令是否已提交？完成通知在哪里？NCCL 还多一个：**对端是否进入同一轮操作，并持续提供数据或返还可复用空间？**
 
 ```text
 本 rank: produce -> ready -> NCCL work -----------------> done -> consume
@@ -15,15 +15,17 @@
 对端:                  匹配操作、发布数据 <-> 消费数据、返还credit
 ```
 
-这里 `ready/done` 表示正确安排的本地 CUDA 依赖；数据就绪与 credit 是通信协议状态，不是通过相同 event 名自动关联。credit 表示当前协议缓冲的消费者返还的可用槽位额度；NET 发送侧可能由 send proxy 返还，并非都直接来自远端 GPU，细节在第 09 章。
+`ready/done` 是正确安排的本地 CUDA 依赖；数据就绪与 credit 是通信协议状态，两边不是靠相同的 event 名自动关联的。**credit** 是当前协议缓冲的消费者返还的可用槽位额度。NET 发送侧的 credit 可能由 send proxy（CPU 侧代为推进网络发送的代理线程）返还，并非都直接来自远端 GPU，细节在第 09 章。
+
+把两边的边界分开记：
 
 - 本地 `ready` 满足，只说明输入先于本地通信可用，不证明远端已发起匹配 collective。
 - 本地 kernel 已 launch，仍可能在等远端数据、CPU proxy 或缓冲 credit。launch 成功不能替代前进性分析。
-- 在正确提交边界之后记录的完成 event 才能代表对应 stream 位置的完成。普通 AllReduce 无相关错误且本地通信正常完成后，即可按 CUDA 依赖消费本地输出，不必另等“远端应用消费确认”；复用本地输出仍须等自己的后续消费者结束。
+- 在正确提交边界之后记录的完成 event，才能代表对应 stream 位置的完成。普通 AllReduce 无相关错误且本地通信正常完成后，即可按 CUDA 依赖消费本地输出，不必另等"远端应用消费确认"；复用本地输出，仍须等自己的后续消费者结束。
 
-因此源码与调试时要分别画**应用/CUDA 依赖图**和**NCCL 参与者之间的等待图**。第 2、4、5 节是这两张图的交界；第 07/09 章进一步解释是谁发布和等待每一个协议状态。
+所以源码与调试时要分别画两张图：**应用/CUDA 依赖图**，以及 **NCCL 参与者之间的等待图**。第 2、4、5 节是这两张图的交界；第 07/09 章进一步解释是谁发布、谁在等待每一个协议状态。
 
-本章假设你已读过第 01/02 章，知道 rank、communicator，以及 AllReduce 对应位置求和的含义。下面统一从两卡输入 `[1,1,1,1]`、`[2,2,2,2]`，输出均为 `[3,3,3,3]` 出发。
+本章假设你已读过第 01/02 章，知道 rank、communicator，以及 AllReduce 对应位置求和的含义。下面统一从两卡输入 `[1,1,1,1]`、`[2,2,2,2]` 出发，输出均为 `[3,3,3,3]`。
 
 ## 1. 先看一张卡上的顺序：输入、通信、输出
 
@@ -86,17 +88,19 @@ CPU:  提交复制 -> AllReduce返回 -> 等待stream完成 ----------> 读回/�
 GPU:       复制输入 --------> 通信/等待peer --------> 写完输出
 ```
 
-默认 communicator 下，一次不在外层 group 中的 collective 成功返回，表示相关提交已经完成，并不是 GPU 已经算出结果。CPU 可以做不依赖输出的其他事，却不能立即复用仍在使用的缓冲。
+默认 communicator 下，一次不在外层 group 中的 collective 成功返回，表示相关提交已经完成——并不是 GPU 已经算出结果。CPU 可以做不依赖输出的其他事，却不能立即复用仍在使用的缓冲。
 
-如果下一步也是 GPU 计算，把消费输出的 kernel 放在**同一 stream**的 NCCL 后面即可，通常不用 CPU 先等；kernel 是在 GPU 上运行的函数。
+如果下一步也是 GPU 计算，把消费输出的 kernel 放在**同一 stream** 的 NCCL 后面即可，通常不用 CPU 先等。kernel 是在 GPU 上运行的函数。
 
 **停一下：** AllReduce 返回了，CPU 能否马上认为 `recv` 全是 3？**不能；还缺相关 GPU 工作完成及正确读回的保证。**
 
+**动手验证（需 GPU）：**复制一份示例，把等待逻辑改成提交后立即 D2H 读回输出，多跑几次观察读到的值是否稳定；再恢复 stream 同步对比。实验后请还原示例，不要把这个写法带进真实程序。
+
 ## 2. 两张卡一起提交：为什么需要 group
 
-上一节每个 rank 有自己的线程/进程。现在只有**一个 CPU 线程依次管理两张 GPU**：第一张卡的提交可能需要其他 rank 参与，如果卡在第一张，就没机会提交第二张。
+本节回答：一个 CPU 线程管理两张卡时，提交为什么会卡住？上一节每个 rank 有自己的线程/进程；现在只有**一个 CPU 线程依次管理两张 GPU**。第一张卡的提交可能需要其他 rank 参与，如果卡在第一张，就没机会提交第二张。
 
-Group 让这个线程先收集两张卡的调用，再一起处理：
+**group** 是 NCCL 的批量提交机制：这个线程先用 GroupStart 收集两张卡的调用，GroupEnd 时再一起处理：
 
 ```text
 CPU线程: GroupStart -> 收集rank0 -> 收集rank1 -> GroupEnd -> 等待两卡完成
@@ -140,7 +144,7 @@ group 内的通信可能尚未排入 stream，此时等待不能证明它已完�
 
 ## 3. 缓冲生命周期：什么时候可以覆盖或释放
 
-`cudaMalloc` 分配的是空间，输入复制才放入有意义的测试数据；AllReduce 的结果在执行结束后才有效。
+`cudaMalloc` 分配的只是空间。输入复制才放入有意义的测试数据；AllReduce 的结果在执行结束后才有效。
 
 | 阶段 | send | recv | CPU 此时可以做什么 |
 |---|---|---|---|
@@ -149,15 +153,15 @@ group 内的通信可能尚未排入 stream，此时等待不能证明它已完�
 | 相关通信已完成 | 本轮不再读取 | 有本轮结果 | 在正确设备上安排读回或后续使用 |
 | D2H 及全部其他使用结束 | 可复用/释放 | 可复用/释放 | 校验 CPU 数组、清理资源 |
 
-例如通信尚未读取完 `send`，另一个 stream 就写下一批输入，会造成“同一个地址上两轮数据相互覆盖”。不是再加一次 NCCL 调用就能修复，必须为两次使用建立依赖，或采用不重叠的双缓冲。
+一个典型错误：通信还没读完 `send`，另一个 stream 就写下一批输入，造成"同一个地址上两轮数据相互覆盖"。这不是再加一次 NCCL 调用就能修复的；必须为两次使用建立依赖，或采用不重叠的双缓冲。
 
-原地 AllReduce 的 send 和 recv 是同一块内存，所以通信会覆盖原始输入；需要保留输入作对照时，要提前保留一份。其他 collective 的合法原地关系见第 02 章，不能都套 `send==recv`。
+原地 AllReduce 的 send 和 recv 是同一块内存，通信会覆盖原始输入。需要保留输入作对照时，要提前保留一份。其他 collective 的合法原地关系见第 02 章，不能都套 `send==recv`。
 
-buffer、stream 和 communicator 都要活到相关使用结束；进阶的注册 handle、事件和 Graph 对象同样遵守这一原则。
+buffer、stream 和 communicator 都要活到相关使用结束。进阶的注册 handle、事件和 Graph 对象同样遵守这一原则。
 
 ## 4. 本地顺序正确，还需要所有 rank 的调用匹配
 
-同一 stream 排序只管本地依赖，不能替你纠正不同 rank 提交了不同操作。
+本节回答：本地顺序都对，为什么还会挂起？同一 stream 排序只管本地依赖，纠正不了"不同 rank 提交了不同操作"。
 
 ```text
 正确：
@@ -169,11 +173,15 @@ rank0: AllReduce(A) -> AllGather(B)
 rank1: AllGather(B) -> AllReduce(A)
 ```
 
-两个 rank “最终都调用了这两个函数”还不够，它们必须按同一逻辑顺序匹配。相同 API 也要有一致的 count、datatype、root、op 等相应契约；否则可能报错、挂起或出现错误数据。
+两个 rank"最终都调用了这两个函数"还不够，它们必须按同一逻辑顺序匹配。相同 API 也要有一致的 count、datatype、root、op 等相应契约；否则可能报错、挂起或出现错误数据。
 
 **怎么检查？** 先为每轮写一张表：`轮号、comm逻辑标识、rank、操作、count、type、op/root`。比较第一个分歧，而不是等挂起后先改网卡配置。跨进程的 communicator 指针不相等是正常的，不能拿指针值作为全局标识。
 
-第一轮实验只使用一个 communicator，每个 rank 按相同顺序提交。多个 communicator 的交错发射、从多个线程无协调地访问同一 comm，会引入额外依赖；它们留到基础稳定后再研究。group 也不是多个线程可以共同使用的锁，Start/End 要按其线程语义配对。
+第一轮实验只使用一个 communicator，每个 rank 按相同顺序提交。
+
+**注意：**
+- 多个 communicator 的交错发射、从多个线程无协调地访问同一 comm，会引入额外依赖；它们留到基础稳定后再研究。
+- group 也不是多个线程可以共同使用的锁，Start/End 要按其线程语义配对。
 
 ## 5. 看懂示例里的等待代码：查询不等于报错
 
@@ -204,7 +212,7 @@ ncclResult_t query_status = ncclCommGetAsyncError(comm, &state);
 - `query_status`：查询 API 本身是否成功。
 - `state`：查到的 communicator 异步状态。
 
-默认示例正常提交后期望两者都成功，再结合 CUDA query 判断完成。NCCL 未报告错误，不意味着 CUDA stream 已经完成；反过来，也不应忽略已发现的 NCCL 异步错误。
+默认示例正常提交后，期望两者都成功，再结合 CUDA query 判断完成。NCCL 未报告错误，不代表 CUDA stream 已经完成；反过来，也不应忽略已发现的 NCCL 异步错误。
 
 **查询错误 ≠ 选择非阻塞 communicator。** 默认 communicator 也有异步执行错误，所以示例会调用 `ncclCommGetAsyncError`，但没有因此启用第 8 节的非阻塞配置。
 
@@ -216,11 +224,11 @@ ncclResult_t query_status = ncclCommGetAsyncError(comm, &state);
 
 出现错误则停止继续提交，不把半完成输出当作有效数据；需要协调 abort/退出或恢复。`ncclCommAbort` 不会补齐丢失的梯度，也不会自动重启远程进程。最小示例采用 fail-fast（报错后停止），不是生产级容错框架。
 
-**机制检查：** 若本地 `ready` 已满足、NCCL kernel 已 launch，但 stream 迟迟不完成，请至少区分 peer 未匹配、网络/proxy 尚未推进、缓冲 credit 耗尽这几类假设。它们并不都能靠增加一个本地 CUDA 同步解决；把等待对象列清楚，再到第 07/09 章找实际状态。需要复习程序生命周期时，再查[示例导读](examples/README.md)。
+**机制检查：** 若本地 `ready` 已满足、NCCL kernel 已 launch，但 stream 迟迟不完成，请至少区分这几类假设：peer 未匹配、网络/proxy 尚未推进、缓冲 credit 耗尽。它们并不都能靠增加一个本地 CUDA 同步解决。把等待对象列清楚，再到第 07/09 章找实际状态。需要复习程序生命周期时，再查[示例导读](examples/README.md)。
 
 ## 7. 主线：NCCL 如何接入多个 stream 的依赖图
 
-当输入生成、通信、结果消费不在同一 stream 上，原有的自动顺序就不够了，需要显式连接：
+本节回答：输入生成、通信、结果消费不在同一 stream 上时，依赖怎么连？原有的同 stream 自动顺序不够了，需要显式连接：
 
 ```text
 compute stream: produce -> record(ready) -> unrelated compute -> wait(done) -> consume
@@ -242,15 +250,15 @@ cudaStreamWaitEvent(compute_stream, done, 0);
 consume<<<grid, block, 0, compute_stream>>>(output);
 ```
 
-逐个箭头看：ready 保证输入生成后通信才读它；done 保证通信写完后消费 kernel 才读输出。完整程序还要检查 CUDA/NCCL 返回值与 kernel launch 错误。
+逐个箭头看因果：ready 保证输入生成后通信才读它；done 保证通信写完后消费 kernel 才读输出。完整程序还要检查 CUDA/NCCL 返回值与 kernel launch 错误。
 
-事件应在正确设备上下文中创建/记录/等待，并活到所有相关使用结束。不要依赖默认 stream 的隐式同步碰巧掩盖缺失依赖；换成独立 stream 后，错误就可能显现。
+事件应在正确的设备上下文中创建、记录、等待，并活到所有相关使用结束。不要依赖默认 stream 的隐式同步碰巧掩盖缺失依赖；换成独立 stream 后，错误就可能显现。
 
 两个 stream 能并发，也不意味着端到端一定更快：通信与计算会争用 GPU 的 SM（执行线程块的计算单元）、HBM（显存）带宽等。若计算独跑 10 ms、通信独跑 4 ms，并发后的总时间仍可能超过 10 ms；这些数字只是示意。是否有收益要看[第 16 章](16-training-integration.md)的应用关键路径。
 
 ### 同一 group 中使用多条 stream：先汇合，再分发完成依赖
 
-与上面的单个 collective 不同，设同一 GPU、同一 communicator 的两次 collective 在一个 group 内分别使用 stream A、B；其他 ranks 也提交匹配的调用。下面只画本 GPU，在本版普通、非捕获的默认 host 路径中，假设 A 被选为承载发射的 stream：
+与上面的单个 collective 不同，设同一 GPU、同一 communicator 的两次 collective 在一个 group 内分别使用 stream A、B；其他 ranks 也提交匹配的调用。下面只画本 GPU，并约定两点：图按本版默认 host 路径（普通、非捕获）绘制；A 被选为承载发射的 stream。
 
 ```text
 A 前序工作 ──┐                        ┌──→ A 后续工作
@@ -259,7 +267,7 @@ B 前序工作 ──┘                        └──→ B 后续工作
               发射前汇合                 完成后分发依赖
 ```
 
-发射前，A 等待 B 已有的前序工作；发射后，B 的后续工作又要等待本组通信完成。NCCL 因此不只是把两个 CPU 调用装进同一批，它也为参与 stream 建立了设备依赖；图中的 NCCL 工作可能包含多个 kernel，不承诺合成一次发射。
+发射前，A 等待 B 已有的前序工作；发射后，B 的后续工作又要等待本组通信完成。NCCL 因此不只是把两个 CPU 调用装进同一批，它也为参与 stream 建立了设备依赖。图中的 NCCL 工作可能包含多个 kernel，不承诺合成一次发射。
 
 例如 B 前面有一项很长的计算，即使它不生产 A 的通信输入，也可能通过这次汇合推迟 A 的通信。只有跨过有效 GroupEnd/主机提交完成边界后，再向 A、B 添加依赖本组结果的后续工作，才能使用上述完成关系。
 
@@ -274,7 +282,7 @@ B 前序工作 ──┘                        └──→ B 后续工作
 | `cudaStreamNonBlocking` | CUDA stream 与 legacy default stream 的隐式同步关系 |
 | `ncclConfig_t::blocking=0` | NCCL 某些主机操作是否允许尚在进行时返回 |
 
-`cudaStreamNonBlocking` 不是“让 NCCL 永远立即返回”，默认 blocking communicator 也不是“等待所有 GPU 通信完成”。最小示例采用前者创建 stream，但没有设置后者。
+`cudaStreamNonBlocking` 不是"让 NCCL 永远立即返回"，默认 blocking communicator 也不是"等待所有 GPU 通信完成"。最小示例采用前者创建 stream，但没有设置后者。
 
 如果确实需要非阻塞 communicator，先用宏初始化配置：
 
@@ -283,7 +291,7 @@ ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
 config.blocking = 0;
 ```
 
-配合 `ncclCommInitRankConfig` 或非阻塞 group 等操作时，可能得到 `ncclInProgress`。这表示相关主机内部工作尚未结束，此时不能直接提交依赖它的下一步操作。
+配合 `ncclCommInitRankConfig` 或非阻塞 group 等操作时，可能得到 `ncclInProgress`。它表示相关主机内部工作尚未结束，此时不能直接提交依赖它的下一步操作。
 
 ```text
 发起主机操作
@@ -295,7 +303,7 @@ config.blocking = 0;
   -> 其他错误: 处理立即失败
 ```
 
-每次查询仍要检查第 5 节的两个结果。多个非阻塞 communicator 组成 group 时，要检查相关 comm，不是其中一个成功就代表全组成功。
+每次查询仍要检查第 5 节的两个结果。多个非阻塞 communicator 组成 group 时，要检查相关 comm；不是其中一个成功就代表全组成功。
 
 主机提交结束后，才可正确添加依赖这些提交的 CUDA 操作或完成事件；此时也仍要另外等待 GPU 数据完成。把三种时刻放在一起看：
 

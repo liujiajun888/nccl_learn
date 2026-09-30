@@ -12,10 +12,14 @@
 - 安全收集唯一日志，核查本版 RAS 和 DEBUG_GLOBAL 真正能做什么。
 - 形成“停止提交—协调 abort—应用恢复”的流程，不误以为 NCCL 会重启 rank。
 
+**推荐路线：**第 1 节的分层表是全章地图，先读；第 2～4 节是每次排查都用到的基本功；第 5、6 节按症状选读；第 7～9 节涉及系统与工具边界；第 10 节的恢复流程留到确认故障后执行。
+
 可独立按本章的清单排查；测试程序构建见 [第 10 章](10-nccl-tests.md)。
 通信路径背景见 [第 7 章](07-transports.md)，性能而非正确性问题见 [第 11 章](11-performance.md)。
 
 ## 1. 先分层，不要看到 NCCL 就先改网卡
+
+本节回答：收到一个 NCCL 相关报错，第一手证据去哪里找？先按下面的层次定位，再动手改任何东西。
 
 | 层次 | 常见表现 | 第一份证据 |
 | --- | --- | --- |
@@ -27,18 +31,23 @@
 | 应用进度 | 某 rank 未进入下一次 collective | 框架异常、数据加载、CPU/GPU 时间线 |
 | 收尾／恢复 | 其他 rank 仍等待、销毁迟迟不返 | 故障传播、abort 调用、进程退出状态 |
 
-`ncclInvalidArgument` / `ncclInvalidUsage` 通常指向参数或契约，也可能是强制配置无可用实现。
-`ncclUnhandledCudaError` / `ncclSystemError` 表示底层调用失败；`ncclRemoteError` 提示远端／网络相关失败，都要看具体日志。
-`ncclInternalError` 需保留版本和复现，不能直接归咎硬件；非阻塞模式的 `ncclInProgress` 是状态而非普通故障码。
-最晚报错的 rank 可能只是受害者；先找最早退出或首次序列分歧，数据加载异常也可能让其他 rank 像网络挂起一样等待。
-CUDA 异步错误可能到后续 NCCL 或同步调用才显现，报错位置不总是致错位置。
+错误码速读：
+
+- `ncclInvalidArgument` / `ncclInvalidUsage` 通常指向参数或契约，也可能是强制配置无可用实现。
+- `ncclUnhandledCudaError` / `ncclSystemError` 表示底层调用失败；`ncclRemoteError` 提示远端／网络相关失败，都要看具体日志。
+- `ncclInternalError` 需保留版本和复现，不能直接归咎硬件；非阻塞模式的 `ncclInProgress` 是状态而非普通故障码。
+
+**注意：**
+- 最晚报错的 rank 可能只是受害者；先找最早退出或首次序列分歧。数据加载异常也可能让其他 rank 像网络挂起一样等待。
+- CUDA 异步错误可能到后续 NCCL 或同步调用才显现，报错位置不总是致错位置。
 
 ## 2. 先保存一次能对齐的最小复现
 
-记录提交、CUDA／驱动、插件、MPI、容器镜像、主机、GPU bus ID、rank 数和完整启动参数。
-保存实际环境和调度器资源分配；分享日志前脱敏主机名、地址和私有路径。
-不要先删库、清理共享内存或修改共享系统：这会破坏现场并影响其他作业。
-如果需要重跑，只在已获授权的资源内，从单机两卡、小规模、校验开启开始。
+本节回答：重跑之前先留下什么？目标是一份别人也能对齐时间线与环境的现场记录。
+
+记录提交、CUDA／驱动、插件、MPI、容器镜像、主机、GPU bus ID、rank 数和完整启动参数。保存实际环境和调度器资源分配；分享日志前脱敏主机名、地址和私有路径。
+
+**安全边界：**不要先删库、清理共享内存或修改共享系统：这会破坏现场并影响其他作业。如果需要重跑，只在已获授权的资源内，从单机两卡、小规模、校验开启开始。
 
 ```bash
 # Linux NVIDIA GPU；从 nccl_learn 执行；仅在读者已分配的两张卡上复现。
@@ -52,20 +61,24 @@ env LD_LIBRARY_PATH="$ROOT/nccl/build/lib:${CUDA_HOME:-/usr/local/cuda}/lib64${L
   > "$LOG_DIR/tests.stdout" 2> "$LOG_DIR/tests.stderr"
 ```
 
-NCCL（不是 shell）展开 `%h/%p` 为主机名／PID；本次独立目录防止跨次覆盖，文件名区分本次进程。
-`NCCL_DEBUG_FILE` 以写模式打开文件，同名可能丢日志；多机目录须各节点可写，非共享存储须分别收集。
-容器 hostname/PID 若不唯一，再加作业／容器 ID 或 launcher rank 前缀；不要只取启动节点日志。
-默认 INFO 未必含 NET/GRAPH；需要调用序列时，短复现再追加 `COLL,CALL,P2P`，必要时短时 TRACE。
-TRACE 会扰动时序，不能混入性能基线；stdout/stderr 也须保留，CUDA、MPI、框架错误可能只在其中。
-`-T 30` 不是整个进程的万能 30 秒看门狗，下节解释其边界。
+NCCL（不是 shell）展开 `%h/%p` 为主机名／PID；每次用独立目录防止跨次覆盖，文件名区分本次进程。
+
+**注意：**
+- `NCCL_DEBUG_FILE` 以写模式打开文件，同名可能丢日志；多机目录须各节点可写，非共享存储须分别收集。
+- 容器 hostname/PID 若不唯一，再加作业／容器 ID 或 launcher rank 前缀；不要只取启动节点日志。
+- 默认 INFO 未必含 NET/GRAPH；需要调用序列时，短复现再追加 `COLL,CALL,P2P`，必要时短时 TRACE。
+- TRACE 会扰动时序，不能混入性能基线；stdout/stderr 也须保留，CUDA、MPI、框架错误可能只在其中。
+- `-T 30` 不是整个进程的万能 30 秒看门狗，下节解释其边界。
 
 ## 3. 超时、挂起和慢：三个不同判断
+
+本节回答：作业“不动了”，是哪一种不动？三者需要的证据和处理都不同。
 
 - **慢：**进度持续前进，只是低于目标，需要时间线和重复样本判断。
 - **超时：**某一层预设期限到了，说明没按期完成，不说明根因必然是网络。
 - **挂起：**观察窗口里没有进展，可能是等待缺席 peer、应用死锁或底层故障。
 
-先问“哪个时钟触发了超时”：
+判断超时先问“哪个时钟触发的”：
 
 | 超时层 | 覆盖什么 | 不覆盖什么 |
 | --- | --- | --- |
@@ -76,20 +89,25 @@ TRACE 会扰动时序，不能混入性能基线；stdout/stderr 也须保留，
 | 框架／调度器 watchdog | 应用或作业管理定义的范围 | 不自动定位底层根因 |
 
 本版 `NCCL_IB_TIMEOUT` 默认 20、`NCCL_IB_RETRY_CNT` 默认 7；前者使用指数时间编码，20 不是“20 秒”。
-反复加大 timeout 可能只延后发现缺席 rank；先查端口、拥塞、进度与契约，作业截止时间则用站点批准的 launcher／调度器策略。
-确认策略能处理全部 rank；只终止启动端不保证远端清理，本章不提供绕过站点的强杀或系统改动。
+
+**注意：**
+- 反复加大 timeout 可能只延后发现缺席 rank；先查端口、拥塞、进度与契约。作业截止时间用站点批准的 launcher／调度器策略。
+- 确认策略能处理全部 rank；只终止启动端不保证远端清理。本章不提供绕过站点的强杀或系统改动。
+
+**动手验证（需 GPU，仅限自有隔离环境）：**用较短的 `-T` 秒数跑一次测试，观察超时触发时的日志层次与退出行为，再回到上表确认 `-T` 覆盖的等待边界。
 
 ## 4. 三个“完成”：API、异步状态、CUDA completion
 
-普通 collective 往 stream 提交工作，API 成功不等于 GPU 输出可用；非阻塞 communicator 还可能返回 `ncclInProgress`。
-这表示主机侧尚未完成提交／推进，须先 poll NCCL 状态再进行依赖它的 CUDA 操作；group 则检查 group 结束与所有相关 comm。
-`ncclCommGetAsyncError(comm, &state)` 有两个结果：
+本节回答：什么时候才能安全使用输出 buffer？先分清三个层次的“完成”。
+
+普通 collective 往 stream 提交工作，API 成功不等于 GPU 输出可用。非阻塞 communicator 还可能返回 `ncclInProgress`，表示主机侧尚未完成提交／推进；须先 poll NCCL 状态，再进行依赖它的 CUDA 操作。group 则检查 group 结束与所有相关 comm。
+
+`ncclCommGetAsyncError(comm, &state)` 有两个结果，不要混为一谈：
+
 1. 函数返回值：这次查询 API 自身是否成功。
 2. `state`：communicator 的异步状态，包括 success、in-progress 或错误。
 
-`state == ncclSuccess` 不等于 stream 完成；安全消费 buffer 还需正确的 CUDA stream/event 依赖或完成查询。
-只做可能永久等待的 `cudaStreamSynchronize` 而没有独立错误监控，可能失去及时 abort 的机会。
-下面是**单 communicator 控制流示意，不可独立编译**；辅助函数由应用实现，`fail` 必须终止正常路径并进入协调恢复。
+`state == ncclSuccess` 仍不等于 stream 完成；安全消费 buffer 还需正确的 CUDA stream/event 依赖或完成查询。下面是**单 communicator 控制流示意，不可独立编译**；辅助函数由应用实现，`fail` 必须终止正常路径并进入协调恢复。
 
 ```cpp
 // 前提：当前 CUDA device 正确；禁止其他线程同时销毁 comm。
@@ -116,32 +134,33 @@ for (;;) {
 ```
 
 多 GPU 应轮询全部相关 communicator 和 stream，不能第一张卡完成就释放所有 buffer。
-失败期间的输出不能当作有效梯度；也不能在设备仍可能访问时提前释放或复用内存。
-nccl-tests 的等待函数展示了 stream query、异步错误查询与 abort，但它不是完整容错训练框架。
+
+**注意：**
+- 只做可能永久等待的 `cudaStreamSynchronize` 而没有独立错误监控，可能失去及时 abort 的机会。
+- 失败期间的输出不能当作有效梯度；也不能在设备仍可能访问时提前释放或复用内存。
+- nccl-tests 的等待函数展示了 stream query、异步错误查询与 abort，但它不是完整容错训练框架。
 
 ## 5. Collective 不匹配与 P2P 死锁
 
-同一 communicator 的 rank 必须按匹配的逻辑顺序调用 collective。
-操作类型、count、datatype、归约方式、root，以及该操作要求的分片语义必须一致。
-不能为了某 rank 没有数据就直接跳过一轮；应采用应用层一致的协议。
-“每个 rank 最终都调用了一次 AllReduce”不够，它们必须匹配到同一轮。
+本节回答：怀疑各 rank 的调用对不上，怎么查证？先记录逻辑序列，再按 sequence 找第一个分歧。
 
-在应用边界记录：逻辑 communicator ID、step、sequence、rank、op、count、type、redop、root。
-再记录 buffer 生命周期、CUDA device 与 stream 依赖，按 sequence 找第一个分歧。
-跨进程的 comm 指针数值本来就不同，不要用指针地址相等作为匹配条件。
-先比较逻辑序列，再解释后面的网络等待；不要在已经坏掉的 communicator 上补一个 barrier 验证。
+同一 communicator 的 rank 必须按匹配的逻辑顺序调用 collective；操作类型、count、datatype、归约方式、root，以及该操作要求的分片语义必须一致。“每个 rank 最终都调用了一次 AllReduce”不够，它们必须匹配到同一轮。不能为了某 rank 没有数据就直接跳过一轮；应采用应用层一致的协议。
 
-P2P 的 send/recv 需要匹配 peer、元素数量、类型与顺序，且使用符合语义的独立缓冲区。
-典型死锁：双方先 send，然后等待 send 的 stream 完成，完成后才提交对应 recv。
-若发送推进依赖接收先被发布，两边都不会走到 recv。
-应将需要并发推进的 send 与 recv 放入同一个 `ncclGroupStart/End`，再等待 group 提交和设备完成。
-只在每个 send 外面各包一个 group，不能解决整体依赖环。
-`sendrecv_perf` 的邻居环在一个 group 中提交 send/recv，可用于阅读正确的基本组织方式。
-不要在共享集群故意制造缺失 rank 或死锁；先纸面画依赖图，在隔离且获准环境再验证。
+在应用边界记录：逻辑 communicator ID、step、sequence、rank、op、count、type、redop、root。再记录 buffer 生命周期、CUDA device 与 stream 依赖。
+
+**注意：**
+- 跨进程的 comm 指针数值本来就不同，不要用指针地址相等作为匹配条件。
+- 先比较逻辑序列，再解释后面的网络等待；不要在已经坏掉的 communicator 上补一个 barrier 验证。
+
+P2P 的 send/recv 需要匹配 peer、元素数量、类型与顺序，且使用符合语义的独立缓冲区。典型死锁：双方先 send，然后等待 send 的 stream 完成，完成后才提交对应 recv；若发送推进依赖接收先被发布，两边都不会走到 recv。
+
+应将需要并发推进的 send 与 recv 放入同一个 `ncclGroupStart/End`，再等待 group 提交和设备完成。只在每个 send 外面各包一个 group，不能解决整体依赖环。`sendrecv_perf` 的邻居环在一个 group 中提交 send/recv，可用于阅读正确的基本组织方式。
+
+**安全边界：**不要在共享集群故意制造缺失 rank 或死锁；先纸面画依赖图，在隔离且获准环境再验证。
 
 ## 6. 初始化成功以后，数据路径仍可能失败
 
-按层缩小范围，预期结果只用于判断下一步方向，不是性能保证。
+本节回答：init 通过、第一次通信却挂了，按什么顺序缩小范围？按下面的层逐级排查；预期结果只用于判断下一步方向，不是性能保证。
 
 1. **启动层：**所有进程是否真的启动？各节点库是否一致？MPI 初始化／小归约是否成功？
 2. **设备层：**每 rank 是否选择独占的正确 GPU？单 GPU CUDA 分配和执行是否正常？
@@ -150,15 +169,15 @@ P2P 的 send/recv 需要匹配 peer、元素数量、类型与顺序，且使用
 5. **跨机传输：**再做两机小消息，检查 HCA、端口、GDR 注册和网络插件。
 6. **规模层：**小规模正常后增大消息或 rank，观察连接数、内存、拥塞和资源限额。
 
-初始化通过仅说明已走过的控制路径可用；部分连接会延迟到第一次通信或首次使用某算法建立。
-因此“挂在第一次 AllReduce”既可能是应用不匹配，也可能是预连接／注册失败。
-单机正常、跨机异常优先关注 NET，但若启动映射在跨机时改变，也必须重新核对 GPU 分配。
-如果关闭某个传输后的单变量对照恢复，只能说明问题与该路径相关，不能直接断言硬件损坏。
-相关隔离变量见第 11 章；每次只改一项，复现后撤销，不保留为全局“修复”。
+初始化通过仅说明已走过的控制路径可用；部分连接会延迟到第一次通信或首次使用某算法建立。因此“挂在第一次 AllReduce”既可能是应用不匹配，也可能是预连接／注册失败。单机正常、跨机异常优先关注 NET，但若启动映射在跨机时改变，也必须重新核对 GPU 分配。
+
+**注意：**
+- 如果关闭某个传输后的单变量对照恢复，只能说明问题与该路径相关，不能直接断言硬件损坏。
+- 相关隔离变量见第 11 章；每次只改一项，复现后撤销，不保留为全局“修复”。
 
 ## 7. 容器、IB、NUMA 与安全边界
 
-以下命令只读检查；缺少工具或权限时保存错误，交给管理员补充，不自行提权或改权限。
+本节回答：不修改任何配置的前提下，能核查哪些系统事实？以下命令全部只读；缺少工具或权限时保存错误，交给管理员补充，不自行提权或改权限。
 
 ```bash
 # Linux NVIDIA GPU；从 nccl_learn 执行；在发生问题的同一作业／容器中检查。
@@ -179,12 +198,17 @@ lspci -tv
 
 ### 共享内存与锁页内存
 
-`/dev/shm` 是共享内存空间，memlock 限额影响锁页／注册资源；容器能看见 GPU 不代表这两项或 RDMA／PCI 拓扑都正常。
-对照分配错误、`df` 和进程限额，不删除 `/dev/shm/nccl-*`；容器 `--shm-size`、`--ulimit memlock=...` 应按需求获得批准。
-本章不执行这些修改，固定容量或 unlimited 也非万能；不用 privileged、扩大设备权限或宿主机 IPC 共享来兜底。
+`/dev/shm` 是共享内存空间，memlock 限额影响锁页／注册资源。容器能看见 GPU，不代表这两项或 RDMA／PCI 拓扑都正常。对照分配错误、`df` 和进程限额判断，不删除 `/dev/shm/nccl-*`。
 
-本版满足条件时可能用 cuMem host allocation，依赖 NUMA、运行库和驱动，并有失败检测／回退机制。
-所以 SHM 空间足够仍可能失败，没 SHM 文件也不代表没分配；规模扩大时还要读栈、FD、cgroup 限额，不改共享系统。
+<details><summary>深入：SHM 空间足够，为什么还可能失败</summary>
+
+本版满足条件时可能用 cuMem host allocation，依赖 NUMA、运行库和驱动，并有失败检测／回退机制。所以 SHM 空间足够仍可能失败，没 SHM 文件也不代表没分配；规模扩大时还要读栈、FD、cgroup 限额，不改共享系统。
+
+</details>
+
+**安全边界：**
+- 容器 `--shm-size`、`--ulimit memlock=...` 应按需求获得批准；本章不执行这些修改，固定容量或 unlimited 也非万能。
+- 不用 privileged、扩大设备权限或宿主机 IPC 共享来兜底。
 
 ### RDMA 权限、端口与拓扑
 
@@ -197,16 +221,16 @@ lspci -tv
 - GPU、NIC、CPU 与 host memory 跨 NUMA 会增加绕行；对照 launcher 绑定和 cpuset 限制。
 - ACS 可能改变 PCIe P2P 路由，IOMMU 涉及 DMA 地址转换、隔离与虚拟化兼容性。
 - 仅凭 P2P 查询为 OK 不能排除上述系统问题；整理 PCI 树和内核模式证据交管理员核验。
-- **不建议关闭 ACS/IOMMU、改 BIOS、安全开关、设备权限或共享网络配置。**
 
-如果管理员提供低层测试结果，区分 host-memory RDMA 和 GPU-memory RDMA；前者通过不保证后者。
-对失败端口记录时间和计数器增量，避免把历史累计错误都算到本次实验头上。
+**安全边界：**不建议关闭 ACS/IOMMU、改 BIOS、安全开关、设备权限或共享网络配置。
+
+如果管理员提供低层测试结果，区分 host-memory RDMA 和 GPU-memory RDMA；前者通过不保证后者。对失败端口记录时间和计数器增量，避免把历史累计错误都算到本次实验头上。
 
 ## 8. 本版 RAS 能看什么，不能做什么
 
-源码确认：`NCCL_RAS_ENABLE` 默认 1，RAS 在 NCCL 初始化过程中启动。
-RAS 线程建立健康监测连接，客户端默认监听 `localhost:28028`，可查询进程与 communicator 状态。
-它能提供缺失／无响应进程、异步错误和 collective 进度等线索，不是训练容错管理器。
+本节回答：RAS（NCCL 的健康监测子系统）能提供什么线索？先给边界：它是状态查询工具，不是训练容错管理器。
+
+源码确认：`NCCL_RAS_ENABLE` 默认 1，RAS 在 NCCL 初始化过程中启动。RAS 线程建立健康监测连接，客户端默认监听 `localhost:28028`，可查询进程与 communicator 状态。它能提供缺失／无响应进程、异步错误和 collective 进度等线索。
 
 ```bash
 # Linux NVIDIA GPU；从 nccl_learn 执行；在已有、获准查询的 NCCL 作业所在节点使用。
@@ -215,25 +239,30 @@ ROOT="${ROOT:-$PWD}"
 "$ROOT/nccl/build/bin/ncclras" -h localhost -p 28028 -v -t 10
 ```
 
-源码构建提供 ncclras，发行包路径可能不同；核对客户端版本，`-h` 是 host，帮助用 `--help`。
-本版还有 JSON、monitor、诊断等能力，以帮助为准；这里仅查询，不执行控制命令或故障注入。
-保持本地监听，不暴露到所有网卡；多作业节点须核对 communicator/job，地址隔离由站点管理。
+源码构建提供 ncclras，发行包路径可能不同；核对客户端版本，`-h` 是 host，帮助用 `--help`。本版还有 JSON、monitor、诊断等能力，以帮助为准；这里仅查询，不执行控制命令或故障注入。
 
-短暂操作计数差异可能只是采样不同，持续不前进才值得追踪；查询无响应也可能是 RAS 路径或初始化问题，不独立证明 GPU 死锁。
-`NCCL_RAS_TIMEOUT_FACTOR` 缩放 RAS 内部超时，不是 collective 总超时；RAS **不会自动重启进程、替换 rank 或恢复模型状态**。
+**注意：**
+- 保持本地监听，不暴露到所有网卡；多作业节点须核对 communicator/job，地址隔离由站点管理。
+- 短暂操作计数差异可能只是采样不同，持续不前进才值得追踪；查询无响应也可能是 RAS 路径或初始化问题，不独立证明 GPU 死锁。
+- `NCCL_RAS_TIMEOUT_FACTOR` 缩放 RAS 内部超时，不是 collective 总超时。
+- RAS **不会自动重启进程、替换 rank 或恢复模型状态**。
 
 ## 9. DEBUG_GLOBAL：名字很大，承诺要按实现来
 
-本版实际环境变量是 `NCCL_CHECK_MODE=DEBUG_GLOBAL`，不是 `NCCL_DEBUG=DEBUG_GLOBAL`。
-`DEBUG_LOCAL` 增加本地 CUDA 指针等检查；GLOBAL 还把参数信息排入全局检查流程。
-核对 `ncclArgsGlobalCheck`：当前额外工作主要是 `registrationCheck`，检查对称注册状态／窗口／偏移。
-它排除 Send/Recv 和部分单边操作，不能被宣传成“检测所有 collective 次序、count、类型不匹配”。
-该检查会做 bootstrap 数据交换，如果某个参与者根本没调用到这里，它本身也可能等待。
-所以不应对所有挂起盲目打开 GLOBAL，更不能以“未报错”证明应用序列正确。
-针对已怀疑的对称注册问题才短时启用；应用调用日志和 CUDA 完成检查仍不可省略。
-注册、设备 API 与更高级检查场景见 [高级主题](13-advanced.md)。
+本节回答：`DEBUG_GLOBAL` 到底检查什么？先纠正名字：本版实际环境变量是 `NCCL_CHECK_MODE=DEBUG_GLOBAL`，不是 `NCCL_DEBUG=DEBUG_GLOBAL`。
+
+`DEBUG_LOCAL` 增加本地 CUDA 指针等检查；GLOBAL 还把参数信息排入全局检查流程。核对 `ncclArgsGlobalCheck`：当前额外工作主要是 `registrationCheck`，检查对称注册状态／窗口／偏移。
+
+针对已怀疑的对称注册问题才短时启用；应用调用日志和 CUDA 完成检查仍不可省略。注册、设备 API 与更高级检查场景见 [高级主题](13-advanced.md)。
+
+**注意：**
+- 它排除 Send/Recv 和部分单边操作，不能被宣传成“检测所有 collective 次序、count、类型不匹配”。
+- 该检查会做 bootstrap 数据交换，如果某个参与者根本没调用到这里，它本身也可能等待。
+- 不应对所有挂起盲目打开 GLOBAL，更不能以“未报错”证明应用序列正确。
 
 ## 10. 故障后：abort 是清理动作，恢复需要应用协议
+
+本节回答：确认故障后按什么顺序收场？一句话边界：NCCL 负责清理通信资源；**重启 rank、恢复训练是应用和作业管理器的事**。
 
 1. 停止向受影响 communicator 提交新通信；保存第一个错误和相关序列。
 2. 通过仍然可用的带外控制面／launcher 通知其他 rank，不能依赖已坏的 collective 做协调。
@@ -243,10 +272,11 @@ ROOT="${ROOT:-$PWD}"
 6. 全体幸存／重启成员达成新的成员关系、rank 编号和状态恢复点，再创建新的 communicator。
 7. 从一致 checkpoint 恢复模型、优化器与数据进度；重放不能把半完成的梯度当有效输入。
 
-`ncclCommDestroy` 属于正常生命周期管理，不应用它替代所有故障情形下的 abort。
-遇到严重 CUDA context 错误时，通常需要由应用管理器重启进程；不要承诺原进程能继续训练。
-本版有 revoke/shrink/grow 等管理 API，但它们不是自动选主、自动重启或自动 checkpoint 恢复。
-采用这些 API 仍要应用提供一致的成员变更协议和错误处理，详见第 13 章。
+**注意：**
+- `ncclCommDestroy` 属于正常生命周期管理，不应用它替代所有故障情形下的 abort。
+- 遇到严重 CUDA context 错误时，通常需要由应用管理器重启进程；不要承诺原进程能继续训练。
+- 本版有 revoke/shrink/grow 等管理 API，但它们不是自动选主、自动重启或自动 checkpoint 恢复；采用这些 API 仍要应用提供一致的成员变更协议和错误处理，详见第 13 章。
+
 恢复后先运行最小正确性检查，再回到 [训练集成](16-training-integration.md) 验证完整 step。
 
 ## 11. 源码锚点与复核路径

@@ -1,8 +1,8 @@
 # 动手示例：从 CPU 模拟到多机 GPU
 
-所有命令从同时含 `nccl/`、`nccl-tests/`、`nccl-tutorial/` 的项目根目录执行。
+这份示例集回答三件事：每个程序验证什么、怎么跑、跑完看什么。所有命令从同时含 `nccl/`、`nccl-tests/`、`nccl-tutorial/` 的项目根目录执行。
 
-**CUDA/UMD 读者使用方式：** 把这里作为最小正确性基线和机制实验入口，不必重读每个 C++/CUDA 基础调用。完成[环境核对](../00-environment.md)后编译运行单进程例子，重点看下面五个 NCCL 交接点；普通分配、vector 与拷贝的八段带练保留在折叠区。没有 GPU 时可跑第 1 节模拟并结合第 04 章分析贡献来源；需要研究跨进程时再使用第 3～4 节 MPI 示例。
+**CUDA/UMD 读者使用方式：** 把这里当作最小正确性基线和机制实验入口，不必重读每个 C++/CUDA 基础调用。完成[环境核对](../00-environment.md)后，编译运行单进程例子，重点核对下面的五个 NCCL 交接点。普通分配、vector 与拷贝的八段带练留在折叠区，需要时再展开。没有 GPU 时，先跑第 1 节的模拟，结合第 04 章分析贡献来源。需要研究跨进程时，再用第 3～4 节的 MPI 示例。
 
 | 追踪点 | 现有单进程代码位置 | 要核对的机制 |
 |---|---|---|
@@ -12,7 +12,7 @@
 | 用户结果校验 | 同文件 `:107–118` | 完成后的全部元素是否满足 collective 契约，而非只看 first |
 | 正常资源退出 | 同文件 `:119–125` | work 不再引用资源后，comm 与用户分配各自如何释放 |
 
-代码见 [single_process_allreduce.cu](single_process_allreduce.cu)。这些示例不插桩 NCCL 内部；要证明 task/plan 或 FIFO 的状态变化，继续用[源码任务](../14-source-map.md)和[机制检查站](../15-exercises.md)，不要从示例 `PASS` 反推出特定算法或 transport 已被使用。
+代码见 [single_process_allreduce.cu](single_process_allreduce.cu)。这些示例不插桩 NCCL 内部。要证明 task/plan 或 FIFO 的状态变化，继续用[源码任务](../14-source-map.md)和[机制检查站](../15-exercises.md)；不要从示例 `PASS` 反推出特定算法或 transport 已被使用。
 
 | 文件 | 用途 | 硬件要求 |
 |---|---|---|
@@ -24,6 +24,8 @@
 GPU 示例固定每 rank 1024 个 FP32 元素，输入全为 `rank+1`，规约为 Sum；输出每元素应为 `P(P+1)/2`。它们是小规模正确性示例，**不是 benchmark，也不是完整生产级容错实现**。
 
 ## 1. 无 GPU：看清每轮发送什么
+
+本节用 CPU 上的 Ring 模拟器回答：每一轮谁把哪一块发给谁。不需要 CUDA：
 
 ```bash
 python3 nccl-tutorial/examples/ring_simulator.py --ranks 4 --chunk-size 2
@@ -63,10 +65,10 @@ PASS: 6 rounds; sent per rank = 12 elements
 
 这样读一遍输出：
 
-1. `--chunk-size 2` 表示**每块**两个元素；四 rank 各有四块，所以每个输入有 8 个元素。rank r 的数组为 `[10r,10r+1,...,10r+7]`，不是后面 GPU 示例的常数输入。
-2. `r0->r1: c0` 表示 r0 向 r1 发数组的第 0 块；c0 是位置，不是来源 rank。ReduceScatter 阶段先让每个 rank 拿到一个完整求和块，AllGather 再把这些块传遍各 rank。
+1. `--chunk-size 2` 表示**每块**两个元素。四个 rank 各有四块，所以每个输入有 8 个元素。rank r 的数组为 `[10r,10r+1,...,10r+7]`，不是后面 GPU 示例的常数输入。
+2. `r0->r1: c0` 表示 r0 把数组的第 0 块发给 r1；c0 是位置编号，不是来源 rank。ReduceScatter 阶段先让每个 rank 拿到一个完整求和块，AllGather 再把这些块传遍各 rank。
 3. 最终第 0 个位置为 `0+10+20+30=60`，第 1 个位置为 `1+11+21+31=64`。程序检查**所有 rank 的全部元素**，不只检查这两个数。
-4. 两阶段各 `P-1=3` 轮，每 rank 每轮发 2 个元素，故末行为 6 轮、每 rank 共发送 12 个元素；这不是耗时或带宽测量。
+4. 两阶段各 `P-1=3` 轮，每 rank 每轮发 2 个元素，所以末行为 6 轮、每 rank 共发送 12 个元素。这不是耗时或带宽测量。
 
 另两条规模命令也已实际运行：三 rank 输出均为 `[30, 33, 36]`，末行为 `PASS: 4 rounds; sent per rank = 4 elements`；一 rank 保留 `[0, 1]`，末行为 `PASS: 0 rounds; sent per rank = 0 elements`。`--self-test` 的本机实测输出为：
 
@@ -74,21 +76,25 @@ PASS: 6 rounds; sent per rank = 12 elements
 PASS: 85 cases (P=1..9, multiple chunk sizes, signed data, invalid shapes)
 ```
 
-**选读：为什么 r0 中途拿到 c1，而不是 c0？** 在 [ring_allreduce](ring_simulator.py) 中查找 `chunk` 和 `owned`：
+`--self-test` 使用固定随机种子，覆盖 P=1..9、多个块长、含负数的随机整数、空输入及非法形状。模拟器不支持非等长或不能等分的输入，这是教学模型限制，不是 NCCL AllReduce 的限制。它是 CPU 上的整数教学模型，不调用 NCCL，也不证明真实 NCCL 本次一定选择 Ring。
+
+<details><summary>深入：为什么 r0 中途拿到 c1，而不是 c0？</summary>
+
+在 [ring_allreduce](ring_simulator.py) 中查找 `chunk` 和 `owned`：
 
 - rank r 发给 `(r+1) mod P`，从 `(r-1) mod P` 接收。
 - ReduceScatter 第 s 轮发送块 `(r-s) mod P`，结束后 rank r 持有全规约块 `(r+1) mod P`。
 - AllGather 第 s 轮发送块 `(r+1-s) mod P`，将这些完整块传遍所有 rank。
 
-这是**AllReduce 内部阶段**的偏移归属，不是公共 `ncclReduceScatter` API 的输出布局。公共 API 必须使 rank r 得到第 r 块；实现可通过块编号/顺序映射满足它。对照[集合通信章](../02-collectives.md)与[算法章](../04-algorithms.md)时，先对齐“第一轮发哪块”，不要只比较 c0/c1 的名字。
+这是 **AllReduce 内部阶段**的偏移归属，不是公共 `ncclReduceScatter` API 的输出布局。公共 API 必须使 rank r 得到第 r 块；实现可通过块编号/顺序映射满足它。对照[集合通信章](../02-collectives.md)与[算法章](../04-algorithms.md)时，先对齐“第一轮发哪块”，不要只比较 c0/c1 的名字。
 
-程序先收集本轮所有发送快照，再统一接收，避免 Python 顺序执行让一个块在“一轮”里前进多跳；`sources` 集合检查没有重复加入同一 rank 的贡献。它是 CPU 上的整数教学模型，不调用 NCCL，也不证明真实 NCCL 本次一定选择 Ring。
+程序先收集本轮所有发送快照，再统一接收，避免 Python 顺序执行让一个块在“一轮”里前进多跳；`sources` 集合检查没有重复加入同一 rank 的贡献。
 
-`--self-test` 使用固定随机种子，覆盖 P=1..9、多个块长、含负数的随机整数、空输入及非法形状。不支持非等长或不能等分的输入，这是教学模型限制，不是 NCCL AllReduce 的限制。
+</details>
 
 ## 2. Linux：编译单进程示例
 
-先完成[环境章](../00-environment.md)中的 NCCL 构建：
+本节把单进程示例编译出来并跑通两卡。先完成[环境章](../00-environment.md)中的 NCCL 构建：
 
 ```bash
 export ROOT="$PWD"
@@ -101,7 +107,7 @@ ldd nccl-tutorial/examples/build/single_process_allreduce
 ./nccl-tutorial/examples/build/single_process_allreduce 2
 ```
 
-默认 `make` 目标仅构建单进程程序，使用 `nvcc`，**不需要 MPI**；规则见 [Makefile](Makefile) 的 `all` 和 `$(BUILD)/single_process_allreduce`。参数是 GPU 数，不是元素数；必须为正整数且不超过可见 GPU 数。程序使用可见列表的前 N 张卡，尊重 `CUDA_VISIBLE_DEVICES`；运行前确认这些 GPU 已获准使用。
+默认 `make` 目标仅构建单进程程序，使用 `nvcc`，**不需要 MPI**；规则见 [Makefile](Makefile) 的 `all` 和 `$(BUILD)/single_process_allreduce`。参数是 GPU 数，不是元素数：必须为正整数，且不超过可见 GPU 数。程序使用可见列表的前 N 张卡，尊重 `CUDA_VISIBLE_DEVICES`；运行前确认这些 GPU 已获准使用。
 
 <details>
 <summary>基础速查：完整程序的八段带练（C++ 容器、分配、拷贝与 NCCL 调用）</summary>
@@ -301,7 +307,7 @@ rank=1 device=1 first=3 expected=3 wrong=0
 PASS
 ```
 
-版本行来自 `NCCL_VERSION_CODE` 和 `ncclGetVersion`（第 59–62 行），你的安装可能打印不同数值；不必为了匹配文档强改版本号，若与预期安装不符，应检查头文件与动态库路径。一卡的退化验证每元素应为 1；有四张获准使用的可见卡时，四卡结果应为 10。
+版本行来自 `NCCL_VERSION_CODE` 和 `ncclGetVersion`（第 59–62 行），你的安装可能打印不同数值。不必为了匹配文档强改版本号；若与预期安装不符，应检查头文件与动态库路径。一卡的退化验证每元素应为 1；有四张获准使用的可见卡时，四卡结果应为 10。
 
 ### 固定路线：command → 成功看到什么 → 失败先查什么
 
@@ -319,9 +325,9 @@ GPU 行仅在 Linux CUDA 环境执行，沿用本节前面的环境变量。先�
 
 ## 3. 选读：MPI 构建和单机验证
 
-先完成单进程两卡验证再来这里。MPI 的作用是启动多个进程并交换引导信息，不是第 2 节的依赖。
+本节回答：跨进程时谁负责启动进程和交换引导信息。先完成单进程两卡验证再来这里。MPI 的作用是启动多个进程并交换引导信息，不是第 2 节的依赖。
 
-[mpi_allreduce.cu](mpi_allreduce.cu) 不含自定义 device kernel，全部是 host API 调用，因此 Makefile 的 `mpi` 目标用 `mpicxx -x c++` 编译并链接 CUDA runtime/NCCL，而不是沿用普通目标的 `nvcc`。这样不需要猜 MPI 库的依赖列表。
+[mpi_allreduce.cu](mpi_allreduce.cu) 不含自定义 device kernel，全部是 host API 调用。因此 Makefile 的 `mpi` 目标用 `mpicxx -x c++` 编译并链接 CUDA runtime/NCCL，而不是沿用普通目标的 `nvcc`，这样不需要猜 MPI 库的依赖列表。
 
 ```bash
 make -C nccl-tutorial/examples mpi \
@@ -343,7 +349,7 @@ MPI 启动进程 -> global rank / shared-memory local rank
  -> MPI_Allreduce 汇总少量CPU校验计数
 ```
 
-按稳定符号读引导代码：`MPI_Comm_split_type(..., MPI_COMM_TYPE_SHARED, ...)` 建立节点内共享内存通信组，再从中取得 `local_rank`，不是用 global rank 猜本地设备。`MPI_Bcast` 广播 rank 0 生成的 NCCL ID；`MPI_Allreduce` 汇总 CPU 校验错误数，**没有用 MPI 对 GPU 测试数组执行 AllReduce**。此外 `MPI_Allgather` 交换节点内的 PCI bus ID，用于下述冲突检查。
+按稳定符号读引导代码。`MPI_Comm_split_type(..., MPI_COMM_TYPE_SHARED, ...)` 建立节点内共享内存通信组，再从中取得 `local_rank`，不是用 global rank 猜本地设备。`MPI_Bcast` 广播 rank 0 生成的 NCCL ID。`MPI_Allreduce` 汇总 CPU 校验错误数，**没有用 MPI 对 GPU 测试数组执行 AllReduce**。此外 `MPI_Allgather` 交换节点内的 PCI bus ID，用于下述冲突检查。
 
 ### GPU 可见性规则
 
@@ -355,7 +361,7 @@ MPI 启动进程 -> global rank / shared-memory local rank
 
 ## 4. 选读：两机各两卡
 
-先在两台节点上确认：相同源码与库、相同绝对目录、相容的 CUDA/驱动、MPI 可正常启动进程、网络互通。`node-a/node-b` 是待替换的主机名。
+本节回答：两台机器各两卡时，命令和预期输出长什么样。先在两台节点上确认：相同源码与库、相同绝对目录、相容的 CUDA/驱动、MPI 可正常启动进程、网络互通。`node-a/node-b` 是待替换的主机名。
 
 ```bash
 export NCCL_DEBUG=INFO
@@ -370,35 +376,37 @@ mpirun --host node-a:2,node-b:2 -np 4 --map-by ppr:2:node \
 
 ## 5. 集中看护栏与适用边界
 
+前面各节的“但不是”集中在这里，逐条核对：
+
 - **返回码护栏，不是算法。** 单进程的 `CUDA_CHECK` / `NCCL_CHECK`（第 12–26 行）执行调用、检查返回值，出错时向 stderr 打印文件、行号和错误描述并退出。`do { ... } while (0)` 是让宏表现为一条语句的写法，不是 GPU 求和循环。普通错误是 fail-fast，不保证走完正常资源释放；MPI 版还调用 `MPI_Abort` 终止自身作业，不做训练恢复。
-- **提交成功不等于完成。** 两例使用默认 blocking communicator，不演示完整的非阻塞 init 状态机；“blocking communicator”和 `cudaStreamNonBlocking` 是不同概念。GPU 完成由 stream 状态确认，NCCL 异步错误另查。
-- **60 秒仅是已提交工作等待的期限。** 单进程从 GroupEnd 返回后、MPI 版从 AllReduce 返回后开始计时；不覆盖可能阻塞的初始化、GroupEnd、MPI 调用、读回或清理本身。单进程等待超时尝试 abort communicator，但 abort 也不是有界返回保证。需要全作业超时时，用调度器 walltime/管理员允许的作业控制方式，不要把轮询当作完整生产容错。
-- **普通 host vector 不是 pinned memory。** `cudaMemcpyAsync` 在这种内存上可能涉及暂存或 host 阻塞；同 stream 顺序保证这里的数据依赖，但不能从片段推导“必然实现 H2D/compute overlap”。输入内存仍保留至完成。
-- **本例验证小规模整数的和。** 两卡等小规模结果在 FP32 下可精确表示，所以使用精确比较；任意浮点规约可能因求和顺序产生误差，不能一律要求逐位一致。
+- **提交成功不等于完成。** 两例使用默认 blocking communicator，不演示完整的非阻塞 init 状态机。“blocking communicator”和 `cudaStreamNonBlocking` 是不同概念。GPU 完成由 stream 状态确认，NCCL 异步错误另查。
+- **60 秒仅是已提交工作等待的期限。** 单进程从 GroupEnd 返回后、MPI 版从 AllReduce 返回后开始计时。它不覆盖可能阻塞的初始化、GroupEnd、MPI 调用、读回或清理本身。单进程等待超时尝试 abort communicator，但 abort 也不是有界返回保证。需要全作业超时时，用调度器 walltime 或管理员允许的作业控制方式，不要把轮询当作完整生产容错。
+- **普通 host vector 不是 pinned memory。** `cudaMemcpyAsync` 在这种内存上可能涉及暂存或 host 阻塞。同 stream 顺序保证这里的数据依赖，但不能从片段推导“必然实现 H2D/compute overlap”。输入内存仍保留至完成。
+- **本例验证小规模整数的和。** 两卡等小规模结果在 FP32 下可精确表示，所以使用精确比较。任意浮点规约可能因求和顺序产生误差，不能一律要求逐位一致。
 - **MPI 简化映射只面向独占整卡。** 不覆盖 MIG、多 rank 同卡；任意重排且各进程不同的多卡可见列表也不在假设内。PCI 冲突检查不能代替正确的调度器分配。
 
 ## 6. 跟着修改：C1 / C2，再选进阶练习
 
-对应[练习章](../15-exercises.md)的 C1/C2。先跑通未修改的完整 `single_process_allreduce.cu`，保留基线以便对照；**一次只做一个变体，C2 从原始 out-of-place 基线开始，不接着 C1 改**。下面是对完整程序的修改提示，不是另一份可独立运行的残缺程序。每次改后重新执行第 2 节 `make` 和两卡命令，并继续检查所有元素及退出码。
+本节对应[练习章](../15-exercises.md)的 C1/C2。先跑通未修改的完整 `single_process_allreduce.cu`，保留基线以便对照。**一次只做一个变体，C2 从原始 out-of-place 基线开始，不接着 C1 改**。下面是对完整程序的修改提示，不是另一份可独立运行的残缺程序。每次改后重新执行第 2 节 `make` 和两卡命令，并继续检查所有元素及退出码。
 
 ### C1：让输入输出用同一块显存（合法 in-place）
 
 选择保留 `send[r]`，沿用它已有的 H2D 初始化：
 
-1. 在 `main` 的指针表（原第 55 行）只保留 `std::vector<float*> send(ndev);`；删除 recv 的 `cudaMalloc`（原第 68 行）。不要把 `recv[r]` 简单赋为 `send[r]` 后还保留两次 free。
-2. 在 `ncclAllReduce`（原第 78 行）把第二个参数从 `recv[r]` 改为 `send[r]`，形成 `ncclAllReduce(send[r], send[r], count, ncclFloat, ncclSum, comms[r], streams[r])`；保留外层 `NCCL_CHECK`、设备选择与整对 group。
+1. 在 `main` 的指针表（原第 55 行）只保留 `std::vector<float*> send(ndev);`，并删除 recv 的 `cudaMalloc`（原第 68 行）。不要把 `recv[r]` 简单赋为 `send[r]` 后还保留两次 free。
+2. 在 `ncclAllReduce`（原第 78 行）把第二个参数从 `recv[r]` 改为 `send[r]`，形成 `ncclAllReduce(send[r], send[r], count, ncclFloat, ncclSum, comms[r], streams[r])`。外层 `NCCL_CHECK`、设备选择与整对 group 都保留。
 3. D2H（原第 111 行）的源也从 `recv[r]` 改成 `send[r]`，否则会检查错误的缓冲。等待完成后，这块显存保存的是规约结果，不再是原始输入。
-4. 删除 `cudaFree(recv[r])`（原第 121 行），保留一次 `cudaFree(send[r])`；CPU inputs、stream、communicator、等待、全元素校验均不变。修改后搜索 `recv`，应已没有该变量的残留引用。
-5. 验收：两卡 stdout 的结果部分仍与基线相同，每卡 `first=3 expected=3 wrong=0`，最后 `PASS`；显存从每卡两块变成一块，不能只以“没崩溃”为通过。
+4. 删除 `cudaFree(recv[r])`（原第 121 行），保留一次 `cudaFree(send[r])`。CPU inputs、stream、communicator、等待、全元素校验都不变。改完后搜索 `recv`，应已没有该变量的残留引用。
+5. 验收：两卡 stdout 的结果部分仍与基线相同，每卡 `first=3 expected=3 wrong=0`，最后 `PASS`。显存从每卡两块变成一块，不能只以“没崩溃”为通过。
 
 ### C2：从 AllReduce 改成 AllGather（不再求和）
 
 目标是每 rank 保留自己的 1024 个输入，最终每卡收到按来源 rank 排列的完整拼接结果。两卡时输出长度为 2048：前 1024 个全是 1，后 1024 个全是 2。
 
-1. **分清发送量与接收量。** 保留 `count=1024`、`bytes=count*sizeof(float)` 用于 send 和 H2D；在它们之后增加 `const size_t recv_count = count * static_cast<size_t>(ndev);` 与 `const size_t recv_bytes = recv_count * sizeof(float);`。CPU `inputs` 每行仍为 count，`output` 则改为 `std::vector<float> output(recv_count);`。
+1. **分清发送量与接收量。** 保留 `count=1024`、`bytes=count*sizeof(float)` 用于 send 和 H2D。在它们之后增加 `const size_t recv_count = count * static_cast<size_t>(ndev);` 与 `const size_t recv_bytes = recv_count * sizeof(float);`。CPU `inputs` 每行仍为 count；`output` 改为 `std::vector<float> output(recv_count);`。
 2. **配套扩大 GPU 与 CPU 的接收容量。** recv 的 `cudaMalloc` 长度改成 `recv_bytes`，D2H 拷贝长度也改成 `recv_bytes`。不能只扩大其中一个：两卡时每卡 send 为 4096 字节，recv 与 CPU output 各为 8192 字节。
 3. **只替换 collective 调用，保留提交框架。** 在 group 内把 AllReduce 调用替换为 `ncclAllGather(send[r], recv[r], count, ncclFloat, comms[r], streams[r])`，仍包在 `NCCL_CHECK` 中。第三参数是每 rank 的 **sendcount**，不是 recv_count；AllGather 没有 `ncclSum` 参数。
-4. **替换验收条件，而不是继续期待 3。** 删除原来的统一 `expected` 公式；在每张接收卡 r 的校验位置，用外层 `source_rank=0..ndev-1`、内层 `i=0..count-1` 遍历全部输出，比较 `output[source_rank * count + i]` 与 `static_cast<float>(source_rank + 1)`，不等则增加 `rank_wrong`。保留每卡清零 `rank_wrong`、累计到 `wrong` 的逻辑。
+4. **替换验收条件，而不是继续期待 3。** 删除原来的统一 `expected` 公式。在每张接收卡 r 的校验位置，用外层 `source_rank=0..ndev-1`、内层 `i=0..count-1` 遍历全部输出，比较 `output[source_rank * count + i]` 与 `static_cast<float>(source_rank + 1)`，不等则增加 `rank_wrong`。保留每卡清零 `rank_wrong`、累计到 `wrong` 的逻辑。
 5. **更新日志，避免留下失效变量。** 将原含 `first/expected` 的整条 printf 改为 `std::printf("rank=%d device=%d wrong=%zu\n", r, devices[r], rank_wrong);`。末尾的 `PASS/FAIL` 和退出码判断不变；等待、两块显存释放、stream/communicator 销毁也保持不变。
 6. **验收。** 每张卡所有块都通过检查，两个 rank 均打印 `wrong=0`，最终 `PASS`。rank 0 和 rank 1 的接收布局都必须是 `[1,...,1,2,...,2]`，不能让“本 rank 的块”一律排第一。公共 API 按 source rank 排布，不能照搬 CPU 模拟器内部阶段的偏移归属。
 
