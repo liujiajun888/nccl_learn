@@ -40,7 +40,7 @@
 - [00 环境准备](00-environment.md)：构建本地 NCCL、确认动态库、跑通两卡基线。
 - [示例代码](examples/README.md)：单进程多卡、MPI 多进程、CPU Ring 模拟器。
 - [集合接口与布局](appendix-collectives.md)：count、结果归属、原地关系和 Send/Recv。
-- [ncclCommInitRank 源码精读](appendix-nccl-comm-init-rank.md)：API、Group 调度、GPU 准备、commHash、commAlloc 与 bootstrap 环，含分节小结和当前阅读断点。
+- [ncclCommInitRank 源码精读](appendix-nccl-comm-init-rank.md)：API、Group 调度、GPU 准备、commHash、commAlloc、bootstrap 环与服务信息交换、proxy 状态，含分节小结和当前阅读断点。
 - [nccl-tests](appendix-nccl-tests.md)：参数、计时与输出列。
 - [性能分析](appendix-performance.md)：延迟/带宽模型、对照实验、计算通信重叠。
 - [现代特性](appendix-modern-features.md)：Graph、NVLS、Device API、GIN、RMA 等扩展入口。

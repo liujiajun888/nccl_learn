@@ -1,4 +1,4 @@
-# ncclCommInitRank 源码精读：从 API 入口到 bootstrap 环
+# ncclCommInitRank 源码精读：从 API 入口到 bootstrap 初始化
 
 这篇文档汇总已经讲解过的 communicator 初始化链路，按“做了什么、为什么需要、给下一步留下什么”组织，便于反复查阅。它是 [03｜Communicator](03-communicator.md) 的逐段阅读补充，不是全部 NCCL API 的清单。
 
@@ -6,7 +6,7 @@
 - 整理日期：2026-10-12。源码链接指向本地仓库；换版本后请按符号重新定位。
 - 主线假设：普通新建 communicator、单 unique ID、未设置 `NCCL_COMM_ID`、默认 Socket bootstrap。
 - 调度主线：`NCCL_ENQUEUE_REARCH_ENABLE=0`；同时说明阻塞/非阻塞和新入队路径的差异。
-- **当前精读进度：到 `bootstrapInit` 中的 bootstrap 环建立完成，即 `bootstrap.cc:894`。**
+- **当前精读进度：已覆盖 `bootstrapInit` 后半段的服务入口、全组信息交换、proxy 状态准备及返回，即 `bootstrap.cc:896–964`。下一步进入 `initTransportsRank` 的首轮信息交换。**
 - 后续传输初始化和收尾只保留已讲过的概览，未展开部分明确标注。
 
 文中的代码片段是教学节选或简化逻辑，省略了部分日志、错误处理和分支，不是可以直接编译运行的完整程序。本文基于源码阅读整理，未进行 GPU 运行验证。
@@ -22,9 +22,10 @@
 7. [commAlloc：为什么分配对象后还要初始化资源](#alloc)
 8. [bootstrap 前提：unique ID 与 root 服务](#bootstrap-root)
 9. [bootstrapInit 前半段：报到、领邻居、连接成环](#bootstrap-ring)
-10. [特殊分支与后续流程概览](#remaining)
-11. [状态、错误与任务生命周期](#state)
-12. [阶段小结、易混点与下一步阅读](#recap)
+10. [bootstrapInit 后半段：服务入口、全组信息交换与 proxy 状态](#bootstrap-info)
+11. [特殊分支与后续流程概览](#remaining)
+12. [状态、错误与任务生命周期](#state)
+13. [阶段小结、易混点与下一步阅读](#recap)
 
 <a id="map"></a>
 
@@ -675,7 +676,7 @@ rank 0 → rank 1 → rank 2 → rank 3
    └─────────────────────────┘
 ```
 
-每个 rank 只需维护相邻的收、发方向，就能通过多轮转发让信息传播到全组。
+每个 rank 只需维护相邻连接，就能通过多轮转发让信息传播到全组。图中箭头用于说明建连方向；TCP Socket 是全双工的，当前 Socket AllGather 会利用两个方向传播，详见第 10.6 节。
 
 root 完成分发后清理资源并退出，后续环交换不需要 root 持续当中转站。
 
@@ -689,15 +690,261 @@ root 完成分发后清理资源并退出，后续环交换不需要 root 持续
 
 即便全部 GPUs 在一台机器且通过 NVLink 互联，控制通道与数据通道仍是不同职责；不能从 bootstrap 走 Socket 推断后续 AllReduce 数据也必然走 TCP。
 
-**本节小结：到第 894 行，root 已帮助 ranks 建立 bootstrap 环；完整 peer 服务地址表及数据传输通道仍未因此全部就绪。当前精读停在这里。**
+**本节小结：到第 894 行，root 已帮助 ranks 建立 bootstrap 环；完整 peer 服务地址表及数据传输通道仍未因此全部就绪。下一节利用这个环交换全组联系信息。**
+
+<a id="bootstrap-info"></a>
+
+## 10. bootstrapInit 后半段：服务入口、全组信息交换与 proxy 状态
+
+源码：[bootstrap.cc:896–964](../nccl/src/bootstrap.cc#L896-L964)。本节继续普通新建、单 ID、默认 Socket bootstrap 主线，UDS 的具体机制以 Linux 实现为例。
+
+```text
+创建本 rank 的 proxy、bootstrap P2P 入口与 UDS 标识
+  → 准备可选 RAS 记录
+  → ringAllInfo 打包
+  → bootstrapAllGather 沿已有环交换
+  → 拆回全组联系信息表
+  → ncclProxyInit 保存资源并创建本地 IPC socket
+  → RAS 信息交接、计时与返回
+```
+
+### 10.1 已经有环，为什么还需要新的入口？
+
+| 通道 | 主要用途 |
+|---|---|
+| 已建立的 bootstrap 环 | 全体 ranks 集体交换初始化信息 |
+| bootstrap P2P 入口 | 指定的两个 ranks 直接交换控制信息 |
+| proxy 服务入口 | 请求某个 rank 的代理服务处理资源、连接等操作 |
+
+环适合全员参与的信息交换，但后续可能只需要 rank 0 和 rank 3 交换一份连接信息。为这种操作提供定向入口，可以避免每次都沿环中转并协调其他 ranks。
+
+这里的 bootstrap P2P 不是公开 API `ncclSend/ncclRecv`，也不是 GPU P2P 数据通道。proxy 服务 socket 也不等同于承载用户张量的网络数据连接。
+
+### 10.2 每个 rank 先把自己的地址填入自己的槽位
+
+先看 [898–902 行](../nccl/src/bootstrap.cc#L898-L902)：
+
+```cpp
+ncclCalloc(&state->peerProxyAddresses, nranks);
+ncclCalloc(&proxySocket, 1);
+createListenSocket(comm, comm->magic, proxySocket,
+                   state->peerProxyAddresses + rank,
+                   ncclSocketTypeProxy);
+```
+
+代码分配长度为 `nranks` 的地址数组，但只创建本 rank 的监听 socket。`state->peerProxyAddresses + rank` 等价于 `&state->peerProxyAddresses[rank]`，是本地地址的输出位置。
+
+例如，4 个 ranks 中的 rank 2 此时看到：
+
+```text
+peerProxyAddresses = [ 未知, 未知, rank 2 的 proxy 地址, 未知 ]
+```
+
+为什么现在就分配完整数组？下一步需要收集其余 ranks 的地址，最终每个 rank 都会保留一份完整联系表。分配数组不意味着在本进程创建其他 ranks 的监听服务。
+
+[907–913 行](../nccl/src/bootstrap.cc#L907-L913) 对 bootstrap P2P 入口做同样的事：
+
+```cpp
+createListenSocket(comm, comm->magic,
+                   &STATE_LISTEN(state, peerSocket),
+                   &peerSocketAddress,
+                   ncclSocketTypeBootstrap);
+ncclCalloc(&state->peerP2pAddresses, nranks);
+memcpy(state->peerP2pAddresses + rank, &peerSocketAddress,
+       sizeof(union ncclSocketAddress));
+```
+
+后续 [socketConnect](../nccl/src/bootstrap.cc#L1067-L1077) 从 `peerP2pAddresses[peer]` 查到目标地址，再连接指定 peer。知道对端地址不代表现在就建立连接；本段没有直接创建一张全连接网络。
+
+### 10.3 UDS：先生成标识，稍后才创建 IPC socket
+
+[904–905 行](../nccl/src/bootstrap.cc#L904-L905)：
+
+```cpp
+ncclCalloc(&state->peerProxyAddressesUDS, nranks);
+getUDS(state->peerProxyAddressesUDS + rank);
+```
+
+不要根据函数名把 `getUDS` 理解为“取得一个已创建的 Socket”。[其实现](../nccl/src/bootstrap.cc#L558-L563)只是：
+
+```cpp
+uint64_t randId;
+getRandomData(&randId, sizeof(randId));
+*peerUDS = getPidHash() + randId;
+```
+
+这里生成一个 64 位标识，之后结合 rank 构造 IPC endpoint 名称。它不是文件描述符、显存地址或 `commHash`，也不是 TCP 的 IP/端口。
+
+UDS 即 Unix Domain Socket，用于同机进程间通信。为什么 proxy 还需要它？资源共享有时需要跨进程传递文件描述符，Linux 实现使用 UDS 的 `SCM_RIGHTS` 机制完成这件事，见 [linux_ipcsocket.cc:205–214](../nccl/src/os/linux_ipcsocket.cc#L205-L214)。
+
+把“我的 fd 是 5”通过 TCP 发送给另一个进程没有这种效果：对方进程中的 fd 5 可能指向完全不同的对象。UDS 传递的是对相应内核资源的访问引用，接收端得到的 fd 数值不必相同。交换到远端机器的 UDS 标识也不意味着可以跨机器使用 UDS。
+
+真正创建、绑定本 rank IPC socket 的动作在后面的 `ncclProxyInit` 中，调用的 Linux 实现见 [ncclIpcSocketInit](../nccl/src/os/linux_ipcsocket.cc#L28-L84)。
+
+### 10.4 RAS：复用同一轮信息交换，并保留集体参与
+
+[915–932 行](../nccl/src/bootstrap.cc#L915-L932)在 RAS 启用时准备本 rank 的记录，包括地址、PID、CUDA/NVML 设备编号、主机 hash 和进程 hash。
+
+RAS 用于可靠性、可用性和可维护性相关的监控诊断。既然即将收集全组信息，就可以把 RAS 记录一起带上，复用这一轮交换。
+
+这里处理 `ncclRasCommInit` 失败的方式值得注意：
+
+```text
+记录错误
+  → 清零本 rank 的 RAS 记录，使地址明确无效
+  → performRasAddRanks = false
+  → 仍然参加下面的 ringAllInfo
+```
+
+为什么不能直接跳过交换？其他 ranks 仍会等本 rank 参与。某项可容忍的本地监控失败，不应让它离开集体步骤，导致其他参与者一直等待。
+
+这不代表所有初始化错误都可忽略；它是此处可选 RAS 初始化的明确处理策略。
+
+### 10.5 ringAllInfo：打包、AllGather、拆包
+
+调用见 [935–937 行](../nccl/src/bootstrap.cc#L935-L937)，实现见 [701–735 行](../nccl/src/bootstrap.cc#L701-L735)。以下按成功路径看数据如何流动。
+
+**第一步：打包自己的记录。** 临时记录类型为：
+
+```cpp
+struct bootstrapRingData {
+  union ncclSocketAddress peerAddress;
+  union ncclSocketAddress peerProxy;
+  uint64_t peerUDS;
+  struct rasRankInit rasRank;
+};
+```
+
+分配 `nRanks` 个记录，只把各输入数组的 `[rank]` 项复制进 `ringData[rank]`。把 rank i 的完整记录记作 `Ai`：
+
+```text
+rank 0：[ A0,  —,  —,  — ]
+rank 1：[  —, A1,  —,  — ]
+rank 2：[  —,  —, A2,  — ]
+rank 3：[  —,  —,  —, A3 ]
+```
+
+**第二步：内部 AllGather。**
+
+```cpp
+bootstrapAllGather(state, ringData, sizeof(struct bootstrapRingData));
+```
+
+`size` 是一个 rank 的记录大小，不是整个数组大小。`ringData` 同时承载输入和输出，本地输入必须已经位于自己的 `[rank]` 槽位。成功后每个 rank 都得到：
+
+```text
+[ A0, A1, A2, A3 ]
+```
+
+它不是调用公开的 `ncclAllGather`，也不发射 NCCL 通信 kernel；它在主机侧使用已有 bootstrap 连接交换控制数据。
+
+**第三步：拆回各数组。** 遍历所有 rank，把临时记录拆回 `peerP2pAddresses[i]`、`peerProxyAddresses[i]`、`peerProxyAddressesUDS[i]` 和可选的 `rasRanks[i]`，最后释放临时 `ringData`。
+
+为什么先打包？这些信息具有相同的参与者和交换时机，合并为一份记录可以减少分别组织多轮交换的开销。函数也允许部分数组参数为空，未提供的字段不进行相应打包/拆包，以复用到其他初始化分支。
+
+### 10.6 socketRingAllGather：当前实现沿环双向传播
+
+[bootstrapAllGather](../nccl/src/bootstrap.cc#L1413-L1438) 根据 `NCCL_OOB_NET_ENABLE` 选择 Net 或 Socket 后端。本节继续默认的 [socketRingAllGather](../nccl/src/bootstrap.cc#L1363-L1412)，不要把它的具体轮数直接套到其他后端或版本。
+
+第 9 节的箭头表示邻居连接关系。TCP Socket 是全双工的，名为 `send` 的连接也能接收，名为 `recv` 的连接也能发送；本实现沿已有相邻连接的两个方向传播记录，并未因此再创建一套环连接。
+
+关键索引如下，`step` 从 0 开始：
+
+```cpp
+int totalSteps = nranks / 2;
+
+int sendSliceRing0 = (rank - step + nranks) % nranks;
+int recvSliceRing0 = (rank - step - 1 + nranks) % nranks;
+int sendSliceRing1 = (rank + step) % nranks;
+int recvSliceRing1 = (rank + step + 1) % nranks;
+```
+
+这些 slice 索引表示“本次发送/接收哪一个 rank 的记录”，不是切换当前相邻连接的目标：
+
+- Ring0：向后继发送，从前驱接收。
+- Ring1：向前驱发送，从后继接收。
+- 第 0 轮发送自己的记录，后续轮次转发上一轮从对应方向收到的记录。
+- 缓冲位置是 `data + slice * size`；`size` 仍为单个 rank 的记录大小。
+
+普通双向轮把四项收发放入 `ncclSocketOp ops[4]`，交给 `socketDoubleSendRecv` 推进。这里只说明其收发关系，不把四个操作理解为四个新线程。
+
+以 4 个 ranks 中的 rank 0 为例，前驱为 rank 3，后继为 rank 1：
+
+| 时刻 | rank 0 的动作 | rank 0 已知记录 |
+|---|---|---|
+| 开始 | 只有自己的记录 | `A0` |
+| 第 1 轮，`step=0` | 向两侧发送 `A0`；从 rank 3 收 `A3`，从 rank 1 收 `A1` | `A0、A1、A3` |
+| 第 2 轮，`step=1` | 向 rank 1 转发 `A3`；从 rank 3 收到其转发的 `A2` | `A0、A1、A2、A3` |
+
+为什么最后一轮只有一个方向？偶数个 ranks 时，最远的对面 rank 只有一个；若两个方向都继续传，会收到两份相同记录。因此源码判断：
+
+```cpp
+bool isFinalUnidirectional =
+    (step == totalSteps - 1) && (nranks % 2 == 0);
+```
+
+最后这个单向轮只用 Ring0，通过 `socketSendRecv` 完成。
+
+- 奇数 N：每轮从两侧各得到一份新记录，共 `(N-1)/2` 轮。
+- 偶数 N：最后一轮只收一份新记录，共 `N/2` 轮。
+- N=1：不需要传播，循环不执行。
+
+因此总轮数是 `floor(N/2)`，4 ranks 用 2 轮，而非普通单向环的 3 轮。传播轮数减少，不等于实际耗时严格减半，也不表示需要收齐的信息量减半。
+
+### 10.7 ncclProxyInit 不等于启动 proxy 服务线程
+
+[941–942 行](../nccl/src/bootstrap.cc#L940-L942)把准备好的资源交给：
+
+```cpp
+ncclProxyInit(comm, proxySocket,
+              state->peerProxyAddresses,
+              state->peerProxyAddressesUDS);
+```
+
+其[实际实现](../nccl/src/proxy.cc#L2111-L2128)主要是：
+
+1. 创建 `comm->sharedRes->proxyState`，让 `comm->proxyState` 指向它，并设置引用计数。
+2. 保存 `listenSock`、`peerAddresses`、`peerAddressesUDS`。这里保存原有指针，不是重新复制整张表。
+3. 使用本 rank 的 UDS 标识调用 `ncclIpcSocketInit`，创建本地 IPC socket。
+
+**这一阶段没有启动 proxy 服务线程。** 真正创建线程的是后面的 [ncclProxyCreate](../nccl/src/proxy.cc#L2130-L2165)，普通路径从 [initTransportsRank](../nccl/src/init.cc#L1775-L1786) 调用，启动 `ncclProxyService` 和 `ncclProxyServiceUDS`。
+
+为什么分两步？服务线程工作需要本地 rank 数量、channel 数量、缓冲参数和后端上下文等信息，其中一部分在后面的初始化阶段才确定。
+
+```text
+bootstrapInit：入口、地址表、proxyState、IPC socket
+  → initTransportsRank：补齐拓扑与运行参数
+  → ncclProxyCreate：启动服务线程
+```
+
+因此不能只根据附近的服务创建注释，把 `ncclProxyInit` 当成“服务线程已经开始运行”。资源生命周期也有分工：[bootstrapClose](../nccl/src/bootstrap.cc#L1587-L1592) 关闭 bootstrap P2P 入口并释放其地址表，proxy 地址表由 [proxy 清理路径](../nccl/src/proxy.cc#L2215-L2225) 释放。
+
+### 10.8 返回前的 RAS 交接与阶段边界
+
+[944–964 行](../nccl/src/bootstrap.cc#L944-L964)完成 RAS 信息交接、计时、日志和返回：
+
+- RAS 已启用且本地初始化允许继续时，尝试 `ncclRasAddRanks(rasRanks, nranks)`。
+- 成功后将局部指针 `rasRanks` 置空，由 RAS 接管；失败则记录日志，局部数组仍在退出路径释放。
+- 输出 bootstrap 分阶段耗时，返回初始化结果。这里不深入展开所有异常清理路径。
+
+成功完成这段主线后：
+
+```text
+已有：bootstrap 环、全组服务联系表、proxyState、本地 IPC 入口
+未完：完整 peer 能力与成员关系分析、GPU/NIC 拓扑、算法图、传输资源、设备状态
+```
+
+服务地址表回答“到哪里联系某个 rank 的服务”，不是完整的硬件拓扑；RAS 记录携带部分设备信息，也不能替代后续 `comm->peerInfo` 和拓扑分析。
+
+**本节小结：已从“拥有相邻控制连接”推进到“拥有全组服务联系信息”。bootstrap 主线讲解到函数返回；proxy 服务线程尚待后续启动，下一步回到 `initTransportsRank`。**
 
 <a id="remaining"></a>
 
-## 10. 特殊分支与后续流程概览
+## 11. 特殊分支与后续流程概览
 
 本节保留已经介绍过的整体轮廓，不代表这些内部实现已经逐行学完。
 
-### 10.1 Split、Shrink、Grow 的入口差异
+### 11.1 Split、Shrink、Grow 的入口差异
 
 源码：[init.cc:2136–2191](../nccl/src/init.cc#L2136-L2191)。
 
@@ -708,13 +955,7 @@ root 完成分发后清理资源并退出，后续环交换不需要 root 持续
 
 把共同的资源初始化与不同的成员协调分开，可以复用主要逻辑，又不强行把所有派生场景写成同一种握手。
 
-### 10.2 bootstrapInit 后半段：下一次精读内容
-
-从 [bootstrap.cc:896](../nccl/src/bootstrap.cc#L896-L942) 开始，还会准备 proxy、bootstrap P2P 等联系信息，并通过 `ringAllInfo → bootstrapAllGather` 收齐，随后调用 `ncclProxyInit`，还有 RAS 相关处理。
-
-待深入的问题：已有相邻环连接后，为什么还需要 P2P 和 proxy 的独立入口？每个 rank 的一份本地信息如何变成全组地址表？
-
-### 10.3 initTransportsRank：完整通信准备的大头
+### 11.2 initTransportsRank：完整通信准备的大头
 
 回到 [init.cc:2196](../nccl/src/init.cc#L2196)。整体职责是交换 peer 信息、分析成员关系和拓扑、规划通信图与 channels、按策略准备传输资源，并建立 GPU 使用的设备状态。
 
@@ -724,9 +965,9 @@ root 完成分发后清理资源并退出，后续环交换不需要 root 持续
 
 <a id="state"></a>
 
-## 11. 状态、错误与任务生命周期
+## 12. 状态、错误与任务生命周期
 
-### 11.1 完成与失败通过 initState 发布
+### 12.1 完成与失败通过 initState 发布
 
 回调执行完传输初始化后尝试启动进度计数监控；该监控失败会记日志，但不阻止初始化主线继续。随后发布成功，见 [init.cc:2198–2208](../nccl/src/init.cc#L2198-L2208)：
 
@@ -741,7 +982,7 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 
 普通路径早已在 `ncclCommInitRankDev` 写入 `*newcomm`。回调末尾的 `if (job->newcomm)` 是可选交接，不能理解为所有普通初始化句柄都只在这个位置返回。
 
-### 11.2 四种“完成”不要混淆
+### 12.2 四种“完成”不要混淆
 
 | 状态或事件 | 含义 |
 |---|---|
@@ -759,7 +1000,7 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 - 非阻塞使用者要同时检查查询函数返回值与输出的异步状态。
 - 后续 collective 返回、GroupEnd 返回或异步错误查询成功，都不能单独代替 GPU stream/event 完成判断。
 
-### 11.3 错误宏表达不同的失败策略
+### 12.3 错误宏表达不同的失败策略
 
 见 [checks.h:24–43](../nccl/src/include/checks.h#L24-L43) 和 [158–166 行](../nccl/src/include/checks.h#L158-L166)。
 
@@ -771,7 +1012,7 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 
 失败不意味着在该标签里直接销毁所有对象；任务、comm 子资源与 Group 有各自的清理责任。不能把 `goto fail` 简化为“立即 free 整个 communicator”。
 
-### 11.4 为什么保留分阶段计时？
+### 12.4 为什么保留分阶段计时？
 
 `timers[]` 用 `clockNano()` 记录 kernel、alloc、bootstrap、拓扑、图、连接等阶段耗时，最后输出 `Init timings`。这样初始化慢时可以先判断时间花在哪一层，而不是只得到一个总时长。
 
@@ -781,9 +1022,9 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 
 <a id="recap"></a>
 
-## 12. 阶段小结、易混点与下一步阅读
+## 13. 阶段小结、易混点与下一步阅读
 
-### 12.1 一张表复习已深入学习的过程
+### 13.1 一张表复习已深入学习的过程
 
 | 阶段 | 已得到什么 | 仍未得到什么 |
 |---|---|---|
@@ -794,8 +1035,10 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 | `commHash` | 紧凑的逻辑组标识 | 连接地址和实际连接 |
 | `commAlloc` | 本地资源、后端上下文、管理容器 | 完整 peer 视图和传输连接 |
 | bootstrap 环建立 | 相邻 ranks 的控制连接 | 全组服务地址表与算法数据通道 |
+| `ringAllInfo → bootstrapAllGather` | 每个 rank 都有全组服务联系信息 | 完整 peer 能力视图、拓扑与数据连接 |
+| `ncclProxyInit` | proxyState、监听 socket 与地址表交接、本地 IPC socket | 后续启动的 proxy 服务线程及完整传输准备 |
 
-### 12.2 常见误解速查
+### 13.2 常见误解速查
 
 | 容易误解的说法 | 准确理解 |
 |---|---|
@@ -811,10 +1054,16 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 | root 必须等齐所有人后才回复 | 相邻信息齐备即可提前回复，最后补发 |
 | bootstrap 永远是纯 TCP | 默认 Socket，环还可选择 Net 后端 |
 | bootstrap 环就是 AllReduce Ring | 一个交换控制信息，一个传输用户数据，构造目的不同 |
+| bootstrap P2P 入口就是公开 Send/Recv 或 GPU P2P | 它用于指定 ranks 间的控制信息交换 |
+| 拿到全组地址就已建立全连接 | 联系信息与连接对象不同，后续仍需按需建连 |
+| `getUDS` 已经创建 UDS socket | 它只生成 64 位命名标识，`ncclProxyInit` 才创建本地 IPC socket |
+| bootstrap AllGather 总是单向 N−1 轮 | 当前默认 Socket 实现双向传播，共 `floor(N/2)` 轮 |
+| `bootstrapAllGather` 的 size 是整个数组大小 | 它是单个 rank 记录的字节数，数组需容纳全组记录 |
+| `ncclProxyInit` 已启动服务线程 | 它准备状态与入口；后续 `ncclProxyCreate` 才启动服务线程 |
 | 初始化成功表示所有算法连接都已提前建立 | 允许按需连接，首次使用时可能继续准备 |
 | 异步错误查询成功等于 GPU 数据已完成 | 还需依据 CUDA stream/event 的完成与依赖语义 |
 
-### 12.3 源码定位表
+### 13.3 源码定位表
 
 | 入口 | 对应内容 |
 |---|---|
@@ -833,15 +1082,22 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 | [bootstrap.cc:291](../nccl/src/bootstrap.cc#L291) | root 报到处理与邻居信息分发 |
 | [bootstrap.cc:754](../nccl/src/bootstrap.cc#L754) | 各 rank 的 bootstrap 初始化 |
 | [bootstrap.cc:687](../nccl/src/bootstrap.cc#L687) | Socket 环连接 |
+| [bootstrap.cc:896](../nccl/src/bootstrap.cc#L896-L964) | 服务入口准备、全组信息交换与返回 |
+| [bootstrap.cc:558](../nccl/src/bootstrap.cc#L558-L563) | `getUDS` 生成 IPC 命名标识 |
+| [bootstrap.cc:701](../nccl/src/bootstrap.cc#L701-L735) | `ringAllInfo` 打包、交换与拆包 |
+| [bootstrap.cc:1413](../nccl/src/bootstrap.cc#L1413-L1438) | `bootstrapAllGather` 后端选择 |
+| [bootstrap.cc:1363](../nccl/src/bootstrap.cc#L1363-L1412) | 当前 Socket 双向环 AllGather |
+| [proxy.cc:2111](../nccl/src/proxy.cc#L2111-L2128) | `ncclProxyInit` 准备状态与 IPC socket |
+| [proxy.cc:2130](../nccl/src/proxy.cc#L2130-L2165) | 后续 `ncclProxyCreate` 启动服务线程 |
+| [init.cc:1234](../nccl/src/init.cc#L1234-L1239) | 下一步：`fillInfo → bootstrapAllGather` |
 
-### 12.4 当前断点与接下来的顺序
+### 13.4 当前断点与接下来的顺序
 
-**已经精读到 `bootstrap.cc:894`，下一次从 [第 896 行](../nccl/src/bootstrap.cc#L896) 继续。**
+**已讲解至 `bootstrapInit` 返回（`bootstrap.cc:964`），下一次回到 [init.cc:2196](../nccl/src/init.cc#L2193-L2196)，进入 `initTransportsRank`。特殊初始化分支和完整异常清理仍未逐行展开。**
 
-1. P2P、proxy 监听入口：为什么有了相邻环还需要这些入口？
-2. `ringAllInfo → bootstrapAllGather`：每个 rank 如何拿到全组联系信息？
-3. `ncclProxyInit`：bootstrap 与服务线程怎样交接资源？
-4. 回到 `init.cc:2196`，分段深入 `initTransportsRank`。
-5. 最后回看成功发布、异常处理、按需连接与首次 collective 的衔接。
+1. 先看 [init.cc:1234–1239](../nccl/src/init.cc#L1234-L1239) 的 `fillInfo → bootstrapAllGather`：从服务联系表进一步得到各 rank 的设备、进程、主机与能力信息。
+2. 分析成员关系与能力约束，再进入 GPU/NIC 拓扑发现和路径计算。
+3. 继续算法图与 channels、proxy 服务启动、transport 资源及设备状态准备。
+4. 最后回看成功发布、异常处理、按需连接与首次 collective 的衔接。
 
 复习时可以先不看源码，尝试回答：unique ID、commHash、rank、comm 指针各解决什么问题？入队后是谁执行？每个阶段的产物由下一层的哪个函数消费？这几个问题能把整条初始化链路串起来。
