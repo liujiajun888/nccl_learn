@@ -1,13 +1,13 @@
-# ncclCommInitRank 源码精读：从 API 入口到 bootstrap 初始化
+# ncclCommInitRank 源码精读：从 API 入口到拓扑与路径
 
 这篇文档汇总已经讲解过的 communicator 初始化链路，按“做了什么、为什么需要、给下一步留下什么”组织，便于反复查阅。它是 [03｜Communicator](03-communicator.md) 的逐段阅读补充，不是全部 NCCL API 的清单。
 
 - 源码基线：NCCL **2.32.3**，提交 `12df1a11afad322be5a204a2db890161cbf8131d`。
-- 整理日期：2026-10-12。源码链接指向本地仓库；换版本后请按符号重新定位。
-- 主线假设：普通新建 communicator、单 unique ID、未设置 `NCCL_COMM_ID`、默认 Socket bootstrap。
+- 最近整理：2026-10-13。源码链接指向本地仓库；换版本后请按符号重新定位。
+- 主线假设：普通新建 communicator、单 unique ID、未设置 `NCCL_COMM_ID`、默认 Socket bootstrap；OS 相关机制主要按 Linux 路径解释。
 - 调度主线：`NCCL_ENQUEUE_REARCH_ENABLE=0`；同时说明阻塞/非阻塞和新入队路径的差异。
-- **当前精读进度：已覆盖 `bootstrapInit` 后半段的服务入口、全组信息交换、proxy 状态准备及返回，即 `bootstrap.cc:896–964`。下一步进入 `initTransportsRank` 的首轮信息交换。**
-- 后续传输初始化和收尾只保留已讲过的概览，未展开部分明确标注。
+- **当前精读进度：已覆盖 `initTransportsRank` 的 peerInfo 交换、能力与成员关系处理、硬件拓扑、路径裁剪重算和 CPU affinity，即 `init.cc:1412`。下一步从第 1414 行进入 CollNet/NVLS 准备与算法图规划。**
+- 后续算法图、channels、实际传输资源和初始化收尾仍保留概览；特殊分支、完整异常清理及部分深层辅助函数未逐行展开。
 
 文中的代码片段是教学节选或简化逻辑，省略了部分日志、错误处理和分支，不是可以直接编译运行的完整程序。本文基于源码阅读整理，未进行 GPU 运行验证。
 
@@ -23,9 +23,12 @@
 8. [bootstrap 前提：unique ID 与 root 服务](#bootstrap-root)
 9. [bootstrapInit 前半段：报到、领邻居、连接成环](#bootstrap-ring)
 10. [bootstrapInit 后半段：服务入口、全组信息交换与 proxy 状态](#bootstrap-info)
-11. [特殊分支与后续流程概览](#remaining)
-12. [状态、错误与任务生命周期](#state)
-13. [阶段小结、易混点与下一步阅读](#recap)
+11. [initTransportsRank 首段：收集身份与能力，发布 peerInfo](#peer-info)
+12. [消费 peerInfo：兼容性、共同能力与同进程成员](#peer-checks)
+13. [硬件拓扑与路径：建图、裁剪、重算和 CPU affinity](#topology)
+14. [特殊分支与后续流程概览](#remaining)
+15. [状态、错误与任务生命周期](#state)
+16. [阶段小结、易混点与下一步阅读](#recap)
 
 <a id="map"></a>
 
@@ -938,13 +941,541 @@ bootstrapInit：入口、地址表、proxyState、IPC socket
 
 **本节小结：已从“拥有相邻控制连接”推进到“拥有全组服务联系信息”。bootstrap 主线讲解到函数返回；proxy 服务线程尚待后续启动，下一步回到 `initTransportsRank`。**
 
+<a id="peer-info"></a>
+
+## 11. initTransportsRank 首段：收集身份与能力，发布 peerInfo
+
+调用处：[init.cc:2196](../nccl/src/init.cc#L2193-L2196)。本节深入 [1234–1239 行](../nccl/src/init.cc#L1234-L1239) 的 `fillInfo → bootstrapAllGather → peerInfoValid`，尚未进入兼容性检查与拓扑搜索。
+
+### 11.1 为什么服务地址交换后，还要再次 AllGather？
+
+`bootstrapInit` 的服务联系表回答“怎样联系其他 ranks”；`peerInfo` 回答“其他 ranks 在哪里、用什么 GPU、具备什么能力”。地址可达，不代表可以使用共享内存、GPU 直接访问或某种网络路径。
+
+```text
+收齐身份与能力记录
+  → 检查兼容性、识别成员关系
+  → 发现 GPU/NIC 拓扑与路径
+  → 规划通信图和 channels
+  → 启动服务、准备传输资源与设备状态
+```
+
+这次复用已有 bootstrap 通道，只是交换的数据类型变了。不能把初始化理解成“调用一次 AllGather 后就拥有所有信息”。
+
+### 11.2 四步主线与 nranks + 1 的含义
+
+省略错误宏后：
+
+```cpp
+ncclCalloc(&comm->peerInfo, nranks + 1);
+fillInfo(comm, comm->peerInfo + rank, comm->commHash);
+bootstrapAllGather(comm->bootstrap, comm->peerInfo,
+                   sizeof(struct ncclPeerInfo));
+COMPILER_ATOMIC_STORE(&comm->peerInfoValid, true,
+                      std::memory_order_release);
+```
+
+四步分别是：分配全组记录数组、填本 rank 的记录、收齐其他记录、向本进程内的读取者发布表已就绪。
+
+多出的一个槽位用于表示 CollNet root：
+
+```text
+peerInfo[0 ... nranks-1]：真实 ranks
+peerInfo[nranks]：CollNet root 的内部预留槽位
+```
+
+它不增加用户通信组的参与者数量。`bootstrapAllGather` 仍按照 bootstrap state 中的真实 rank 数交换。
+
+### 11.3 fillInfo：设备身份不能只用 cudaDev
+
+实现：[init.cc:888–982](../nccl/src/init.cc#L888-L982)；记录类型：[transport.h:46–74](../nccl/src/include/transport.h#L46-L74)。
+
+`comm->peerInfo + rank` 等价于 `&comm->peerInfo[rank]`，所以 `fillInfo` 只填自己的一个槽位，不负责获取所有人的信息。
+
+| 字段 | 身份视角 |
+|---|---|
+| `rank` | 通信组成员编号 |
+| `cudaDev` | 该进程可见的 CUDA 设备下标 |
+| `nvmlDev` | NVML 管理视角的设备编号 |
+| `busId` | PCI 硬件位置 |
+| `gpuUuid` | GPU/分区身份 |
+
+教学例子：进程 A 和进程 B 都只看见一张 GPU，各自的 `cudaDev` 都可以为 0，却分别对应物理 GPU A 和 GPU B。因此后续重复设备检查不能单独比较 `cudaDev`，需要结合主机身份与 GPU UUID。
+
+### 11.4 hostHash、pidHash 为什么再加 commHash？
+
+```cpp
+info->hostHash = getHostHash() + commHash;
+info->pidHash = getPidHash() + commHash;
+```
+
+基础标识来源见 [utils.cc:85–187](../nccl/src/misc/utils.cc#L85-L187)：
+
+- Linux 的 `getHostHash()` 默认对 hostname 与 boot ID 的组合求 hash，支持 `NCCL_HOSTID` 覆盖；读取 boot ID 失败时保留 hostname 回退。
+- Linux 的 `getPidHash()` 组合 PID 与 PID namespace 信息。不同容器都可能有 PID 1，不能只凭这个整数认定同进程。
+- 判断同进程时还要同时比较主机身份，避免把不同主机上的进程混为一谈。
+
+设主机基础标识为 H、通信组标识为 G：
+
+```text
+同组同机：H + G 与 H + G 仍然相等
+同机另一组：保存值变成 H + G2
+```
+
+这使 `peerInfo` 内保存的身份带上逻辑通信组的作用域，不需要额外通信。它不是重新探测主机，也不是认证凭据；不同组的 hash 可能碰撞，容器环境和配置也会影响基础标识，不能视为绝对的物理身份保证。
+
+### 11.5 shmDev：同机不代表共享同一个 /dev/shm
+
+Linux 分支：
+
+```cpp
+struct stat statbuf;
+stat("/dev/shm", &statbuf);
+info->shmDev = statbuf.st_dev;
+```
+
+`shmDev` 是 `/dev/shm` 所在文件系统的设备标识，不是 CUDA 设备编号，也不是共享内存指针。
+
+为什么收集它？同机的两个容器可能具有不同的 `/dev/shm` 挂载。后续 [shmCanConnect](../nccl/src/transport/shm.cc#L61-L82)先比较 `hostHash`，再比较 `shmDev`；不匹配时提前返回，可连接输出仍为 0。
+
+这里先记录共享内存环境的线索，后面 transport 再判断是否适用。通过这些检查仍不等于共享内存资源已经创建成功。
+
+### 11.6 版本与能力是后续选择的输入
+
+| 字段示例 | 后续用途 |
+|---|---|
+| `version`、`gitVersionHash` | NCCL 版本与源码构建指纹检查 |
+| `cudaDriverVersion`、`cudaCompCap` | 驱动条件和 GPU 计算能力 |
+| `cuMemSupport` | 本地 cuMem 路径的启用状态 |
+| `gdrSupport`、`cuMemGdrSupport` | GPUDirect RDMA 及相关内存路径能力 |
+| `fabricInfo`、`fabricHandleSupport` | MNNVL/Fabric 判断 |
+| `gpuCftSupport` 及相关布尔字段 | CFT 支持等级与细分能力 |
+| `supportedGinTypeBitMask` | 本地 GIN 后端类型集合 |
+| `crossNicSupport`、`rmaPluginAvailable` | 后端能力和可用性 |
+
+本地支持不代表全组可以统一使用，后续还要求共同能力并检查配置。`gdrSupport` 为真，也不保证某条实际 GPU↔NIC 路径最终采用 GDR，仍要结合拓扑、后端和配置。
+
+`fillInfo` 并非全是字段复制：它会调用 CUDA、NVML 和能力探测函数。主要产物是身份与能力记录，不是完整的 peer 数据连接；MNNVL、GIN、CFT 的全部内部实现暂不展开。
+
+### 11.7 为什么连 comm 指针也放进交换记录？
+
+```cpp
+info->comm = comm;
+```
+
+多个 ranks 可以位于同一个进程。教学例子：
+
+```text
+进程 A：rank 0 → comm0，rank 1 → comm1
+进程 B：rank 2 → comm2
+```
+
+rank 0 和 rank 1 共享地址空间，可以使用彼此的 comm 指针。rank 2 收到这些指针值，不意味着获得远程对象访问能力，不能解引用它们。
+
+后面的 [1330–1338 行](../nccl/src/init.cc#L1330-L1338)正是先确认 `hostHash` 和 `pidHash` 都匹配，再使用 `peerInfo[i].comm` 串联同进程对象。统一交换结构不代表其中每个字段对所有接收者都能直接使用。
+
+### 11.8 AllGather 与 peerInfoValid 的阶段边界
+
+将 rank i 的记录记作 Pi：
+
+```text
+交换前：
+rank 0：[ P0,  —,  —,  — ]
+rank 1：[  —, P1,  —,  — ]
+rank 2：[  —,  —, P2,  — ]
+rank 3：[  —,  —,  —, P3 ]
+
+交换后，每个 rank：[ P0, P1, P2, P3 ]
+```
+
+本地输入在 `[rank]`，`size` 是单条记录字节数；这是内部主机侧通信，不重新建环，也不是公开 `ncclAllGather`。每个 rank 都需要完整副本，以执行后面的本地决策。
+
+随后以 release 写入 `peerInfoValid=true`。例如 [RAS 诊断](../nccl/src/ras/diagnostics.cc#L88-L94)会用 acquire 读取这个标志，未就绪时不使用表。配对同步保证读者看到发布前完成的记录写入。
+
+它只表示“本进程里的这张表已可读”，不是跨机器内存屏障，也不是整个 communicator 初始化成功。版本与能力检查就在它后面，因此表可读甚至不等于兼容性检查已通过。
+
+**本节小结：到 `init.cc:1239`，各 rank 从“知道服务地址”推进到“拥有全组身份与能力记录”。验证这些记录、汇总能力、构造成员关系仍在下一节。**
+
+<a id="peer-checks"></a>
+
+## 12. 消费 peerInfo：兼容性、共同能力与同进程成员
+
+源码：[init.cc:1241–1379](../nccl/src/init.cc#L1241-L1379)。本节从“收齐记录”推进到“据此作决策”，仍未开始硬件拓扑发现。
+
+### 12.1 contiguousRanksPerHost 统计的是连续区间
+
+[1247–1270 行](../nccl/src/init.cc#L1247-L1270)按 rank 顺序扫描 `hostHash`，用 `prevHostHash` 记录当前主机区间，用 `currentHostSize` 记录连续区间长度。
+
+```text
+rank： 0  1  2  3  4  5
+host： A  A  B  B  C  C
+       └─┘  └─┘  └─┘
+长度：  2    2    2
+
+contiguousRanksPerHost = 2
+```
+
+第一次区间结束时建立长度基准，后面区间与它比较；长度不一致时以 `INT_MAX` 表示不规则排列。
+
+为什么需要这个值？规则排列下可以按步长选取对应成员，例如 `0、2、4` 或 `1、3、5`。后续 [GIN rail 连接模式](../nccl/src/gin/gin_host.cc#L138-L144)会使用这个步长。
+
+它不是任意主机的总 rank 数统计：`A B A B` 会形成四个长度为 1 的连续区间，而不是直接统计成两个各有 2 个 ranks 的主机集合。
+
+**源码边界：**[1258 行](../nccl/src/init.cc#L1253-L1259)在发现中间区间长度不一致时执行 `break`，退出的是整个外层 `for`；版本检查、重复 GPU 检查和能力归并也在这个循环中，因此该分支会跳过当前及后续成员的这些处理。下面按循环能够完整扫描的正常路径解释，不将其描述为所有布局下一定完成全组检查。这里记录的是静态源码行为，尚未进行该分支的运行验证。
+
+### 12.2 两种版本检查，处理强度不同
+
+| 检查 | 当前处理 |
+|---|---|
+| `peerInfo[i].version` 与本 rank 的版本不同 | 设为 `ncclInvalidUsage`，转到失败路径 |
+| 版本号相同但 `gitVersionHash` 不同 | rank 0 输出提醒，本项检查不直接终止初始化 |
+
+版本检查见 [1273–1277 行](../nccl/src/init.cc#L1273-L1277)，源码指纹检查见 [1304–1311 行](../nccl/src/init.cc#L1304-L1311)。
+
+为什么检查？后续 ranks 需要按共同的内部数据格式和协议协作，不能简单假定不同版本可以混用。相同发布版本也可能来自不同源码构建，额外指纹有助于暴露差异；由 rank 0 提醒可以减少重复日志。
+
+### 12.3 重复设备：NVML 编号与 GPU UUID 的区别
+
+[1287–1296 行](../nccl/src/init.cc#L1287-L1296)对每个 i 比较此前所有 `j < i`，不是只比较“别人是否与我重复”。
+
+简化条件：
+
+```text
+未启用 MULTI_RANK_GPU_ENABLE
+  且同主机
+  且 GPU UUID 相同
+    → ncclInvalidUsage
+```
+
+`NCCL_MULTI_RANK_GPU_ENABLE` 当前默认是 0，见 [init.cc:73](../nccl/src/init.cc#L73)。这里表达的是默认禁止、可显式启用的配置约束，不是任何条件下都不允许多 rank 共用 GPU。
+
+还有两个不能混为一谈的判断：
+
+| 条件 | 含义 |
+|---|---|
+| 同主机、相同 `nvmlDev` | 多个 ranks 对应同一 NVML 设备，记录 `hasMultiRankNvml` |
+| 同主机、相同 `gpuUuid` | 多个 ranks 使用同一 GPU/分区身份，参与重复设备检查 |
+
+MLOPart 的不同分区可以属于同一 NVML 设备，但具有不同 UUID。因此 `hasMultiRankNvml=true` 本身不等于重复 GPU 检查失败。是否出现 MLOPart 则另用 `hasMloPart` 记录。
+
+### 12.4 共同能力：AND、交集与最小值
+
+[1280–1302 行](../nccl/src/init.cc#L1280-L1302)把各 rank 的记录归并成后续选择条件：
+
+| 信息 | 归并方式 | 设计目的 |
+|---|---|---|
+| `cuMemSupport`、`cuMemGdrSupport` | 初始为真，任何不支持者使其为假 | 判断全员支持 |
+| `globalCrossNicSupport`、`globalRmaPluginSupport` | 布尔 AND | 收缩为共同能力 |
+| `globalGinTypeBitMask` | 按位 AND | 保留所有 ranks 都支持的后端类型 |
+| `gpuCftSupport` | 最小支持等级 | 取共同可依赖的等级 |
+| `gpuCftMulticastSupport`、`gpuCftCountedSupport` | 分别做 AND | 检查 CFT 细分能力是否全员具备 |
+| `minDriverVersion` | 最小版本 | 保留组内驱动的保守边界 |
+
+例如，三个位表示三种 GIN 类型：
+
+```text
+rank 0：011
+rank 1：110
+交集：  010
+```
+
+`globalGinTypeBitMask` 初始为 `UINT64_MAX`，因为全 1 与第一个集合相与，结果仍是第一个集合；从 0 开始则永远得不到任何类型。
+
+为什么不是并集？某些路径要求参与者共同支持，不能因为自己支持就让其他成员走同一机制。这也不是把所有 GPU 的性能强行降到相同水平，而是为选择提供兼容性边界。
+
+这些结果是后续决策的输入，不是路径已经启用。例如 [1923–1932 行](../nccl/src/init.cc#L1923-L1932)还会结合 cuMem GDR、MLOPart、跨 NIC 支持和 rank 排列决定 GIN/RMA 相关能力。
+
+### 12.5 MNNVL 检查与局部 nNodes 的命名陷阱
+
+[1316–1320 行](../nccl/src/init.cc#L1316-L1320)在发现异机成员、配置允许且相关 P2P 条件满足时尝试 `ncclMnnvlCheck`；显式启用 MNNVL 的设置也可触发检查。
+
+前面局部 `nNodes` 初始为 1，但更新方式是：
+
+```cpp
+if (comm->peerInfo[i].hostHash != comm->peerInfo[rank].hostHash)
+  nNodes++;
+```
+
+这里没有按主机去重。两台机器各 4 ranks，完整扫描后本机视角会得到 5，而非 2。此处主要用 `nNodes > 1` 判断是否出现异机成员，不能当作最终精确节点数 `comm->nNodes`。
+
+[ncclMnnvlCheck](../nccl/src/mnnvl.cc#L14-L94)检查 cuMem、Fabric handle 支持、Fabric 初始化状态，确定 NVLink domain/clique 成员，并试验 Fabric handle 的导出与导入。上一节采集的 `fabricInfo` 在这里被消费。
+
+为什么此时检查？有些跨节点系统存在 NVLink Fabric，不能只凭主机不同就认定只能走传统网络。
+
+返回 `ncclSuccess` 不一定表示 MNNVL 已启用：条件不满足时也可正常返回，而不设置 `comm->MNNVL`。相反，确认存在相关能力但 Fabric 资源实际不可用时，还可能报错。检查过程成功与能力启用是不同概念。
+
+### 12.6 同进程成员的三个编号
+
+[1322–1379 行](../nccl/src/init.cc#L1322-L1379)用 `do { ... } while (0)` 包住一组局部逻辑；它只执行一次，不是重试循环。
+
+按全局 rank 递增扫描，确认 `hostHash` 与 `pidHash` 都匹配后，统计：
+
+```cpp
+if (intraProcRanks == 0) intraProcRank0 = i;
+if (i == rank) intraProcRank = intraProcRanks;
+intraProcRanks++;
+```
+
+教学布局：
+
+```text
+主机 A：进程 P 有 rank 0、rank 2；进程 Q 有 rank 1
+主机 B：进程 R 有 rank 3
+```
+
+rank 2 看到的同进程成员是 `0、2`：
+
+| 变量 | 值 | 含义 |
+|---|---:|---|
+| `intraProcRank0` | 0 | 本进程成员中首个成员的全局 rank |
+| `intraProcRank` | 1 | 自己在本进程成员中的局部编号 |
+| `intraProcRanks` | 2 | 这个通信组在本进程的成员数 |
+
+通过检查后写入 `comm->intraComm0`、`comm->intraRank`、`comm->intraRanks`。进程 R 只有 rank 3 时，其 `intraComm0` 指向 rank 3 自己，不指向全局 rank 0。
+
+`intraRanks` 不等于同机 rank 数，也不是所有逻辑通信组在本进程中的 comm 总数。同一轮循环还求全组 `minCompCap/maxCompCap`，为异构 GPU 决策保留能力范围。
+
+### 12.7 intraNext 链表与 barrier 状态分别做什么？
+
+只有本进程首 rank 负责串联其他本进程 comm：
+
+```cpp
+if (intraProcRank0 == rank && rank != i) {
+  comm->peerInfo[i].comm->intraNext = comm->intraNext;
+  comm->intraNext = comm->peerInfo[i].comm;
+}
+```
+
+单个构造者避免多个初始化任务同时修改同一条链。上述例子形成 `comm0 → comm2 → nullptr`。这是进程内对象链表，不是 bootstrap 环或算法 Ring；后续 [finalize/清理逻辑](../nccl/src/init.cc#L3260-L3280)会沿它遍历。
+
+随后清零 `intraBarrierPhase`、`intraBarrierCounter`、`intraBarrierGate`。后续 [ncclCommIntraBarrierIn/Out](../nccl/src/include/comm.h#L943-L976)通过共享的 `intraComm0` 计数与放行，供特定 Group launch 等主机侧协调使用。
+
+这里仅准备状态，没有执行一次 barrier，更不代表 GPU 工作完成。
+
+### 12.8 NVLS 注册路径还依赖进程组织方式
+
+[1342–1355 行](../nccl/src/init.cc#L1342-L1355)更新 `nvlsRegSupport`：
+
+1. 初始为 1。
+2. 通信组中存在两个 ranks 属于同一进程时，先设为 0。
+3. MNNVL 已启用时，设为 0。
+4. 否则，显式开启 `NCCL_SINGLE_PROC_MEM_REG_ENABLE` 可设回 1；该参数默认关闭，见 [group.cc:680](../nccl/src/group.cc#L680)。
+
+`nvlsRegSupport` 是 NVLS 相关注册路径的支持条件，不是 `nvlsSupport` 本身。设为 0 不代表整个 NCCL 无法通信，也不能直接推断 NVLS 算法完全不可用。
+
+**本节小结：正常推进到 `init.cc:1379` 后，已完成本段兼容性与能力处理，并建立同进程编号、对象链表和协调状态。硬件之间怎样连接，仍要下一节建图和算路。**
+
+<a id="topology"></a>
+
+## 13. 硬件拓扑与路径：建图、裁剪、重算和 CPU affinity
+
+主线：[init.cc:1381–1412](../nccl/src/init.cc#L1381-L1412)。此前已知道成员身份和能力，现在要知道 GPU、CPU、NIC 怎样连接、哪些路径可用，为后续 Ring/Tree 规划提供输入。
+
+### 13.1 硬件图与算法通信图不是同一个对象
+
+| 对象 | 回答的问题 |
+|---|---|
+| `ncclTopoSystem`，即 `comm->topo` | 硬件资源怎样连接，端点之间有哪些可用路径？ |
+| 后续的 `ncclTopoGraph` | 为某种算法，怎样安排 GPU 顺序、通道和网络出口？ |
+
+先认识路网，再规划通信顺序。当前这段还没有确定算法 Ring/Tree：
+
+```cpp
+ncclTopoGetSystem(comm, &comm->topo);
+ncclTopoComputePaths(comm->topo, comm);
+ncclTopoTrimSystem(comm->topo, comm);
+ncclTopoComputePaths(comm->topo, comm);
+ncclTopoSearchInit(comm->topo);
+ncclTopoComputeCommCPU(comm);
+ncclTopoPrint(comm->topo);
+```
+
+三层职责是“建图 → 算路、裁剪、重算 → 准备搜索参数”。
+
+### 13.2 ncclTopoGetSystem：融合多个来源的硬件描述
+
+实现：[topo.cc:1989–2178](../nccl/src/graph/topo.cc#L1989-L2178)。
+
+```text
+读取可选 XML 描述
+  → 探测本 rank 的 GPU 及相关硬件
+  → 导入网络插件的设备信息
+  → 交换、融合各 rank 的局部描述
+  → 转成 ncclTopoSystem
+```
+
+开头尝试读取 `NCCL_TOPO_FILE`，未指定时尝试默认的 topology 服务文件；没有现成描述时创建 XML 根节点，继续自动发现。
+
+XML 是统一的中间表示，用于融合外部描述、OS 探测、NVML 和网络插件属性。它大部分时间是内存结构，并非每一步都读写磁盘，也不要求用户必须提供 XML 文件。
+
+`NCCL_TOPO_DUMP_FILE` 则用于导出发现、合并后的 XML。`init.cc` 中的 dump 调用与实际设置 `comm->topo` 的调用分开；不能把 dump 文件当作随后裁剪完成、包含所有路径缓存的完整对象快照。
+
+[2026–2035 行](../nccl/src/graph/topo.cc#L2026-L2035)通过本 rank 的 `busId` 调用 `ncclTopoFillGpu`，给节点填入 `keep`、`rank`、`gdr` 等属性。[ncclTopoFillGpu](../nccl/src/graph/xml.cc#L1077-L1085)结合 OS 层 PCI 信息和 NVML 查询补充 GPU 描述。
+
+为什么各 rank 主要探测自己负责的 GPU？各进程的设备可见性可能不同，局部探测后再合并，才能拼接分散的视图。网络设备则由 Net、CollNet、GIN、RMA 等相应插件提供列表和属性，使图反映后端实际可用的资源。
+
+### 13.3 XML 融合：再次交换，但参与范围不同
+
+[2118–2156 行](../nccl/src/graph/topo.cc#L2118-L2156)调用 `bootstrapIntraNodeAllGather`。普通路径用 `hostHash` 选出同机 ranks；MNNVL 路径按 clique 组织融合，范围不必局限于一台机器。
+
+```text
+rank 0 提供 GPU 0 的局部描述
+rank 1 提供 GPU 1 的局部描述
+rank 2 提供 GPU 2 的局部描述
+            ↓
+参与融合的 ranks 各自得到合并后的描述
+```
+
+这不是由某个 rank 探测整个集群所有交换机布线后广播。普通路径主要形成同机相关硬件视图，跨节点算法关系还要后续协调。
+
+XML 内部也有父子指针。[ncclTopoConvertXml](../nccl/src/graph/xml.cc#L256-L272)在发送前把它们转换成相对偏移，接收后再恢复成本地指针；不能直接把其他进程的 XML 指针拿来遍历。
+
+融合后由 [ncclTopoGetSystemFromXml](../nccl/src/graph/topo.cc#L1057-L1088)创建节点、补充 NVLink/C2C/PCI 连接，处理部分硬件特例并整理成内部图。
+
+### 13.4 节点、边、路径三层表示
+
+定义见 [topo.h:46–183](../nccl/src/graph/topo.h#L46-L183)：
+
+| 层次 | 关键内容 |
+|---|---|
+| `ncclTopoNode` | 设备或资源类型、身份、直接连接与路径缓存 |
+| `ncclTopoLink` | 直接连接的类型、带宽模型值、对端节点 |
+| `ncclTopoLinkList` | 到某个目标的连接序列、连接数量、路径带宽与类别 |
+
+常见节点包括 `GPU/DEV`、`PCI`、`NVS`、`CPU`、`NIC/NET` 等。`GPU/DEV` 区分 rank/分区与底层设备表示；`CPU` 在这里实际按 NUMA domain 建模，不是一个 CPU core。
+
+省略部分内部节点层次的教学图：
+
+```text
+GPU 0 ── PCIe switch ── CPU/NUMA 0
+             │              │
+            NIC 0        系统互联
+                            │
+GPU 1 ── PCIe switch ── CPU/NUMA 1
+             │
+            NIC 1
+```
+
+它表达了 GPU 0 到 NIC 0 与 NIC 1 的路径差异，也表明同机 GPU 之间可能要跨 NUMA。只有“同机”标签不足以指导性能选择。
+
+节点和路径是规划数据，不是已创建的 CUDA、Socket 或 RDMA 连接。
+
+### 13.5 ncclTopoComputePaths：先算硬件路径，再结合策略修正
+
+实现：[paths.cc:754–898](../nccl/src/graph/paths.cc#L754-L898)。先清除旧路径，围绕 CPU、GPU、DEV、网络端点、NVSwitch 等节点计算路径，再应用能力与配置约束。
+
+底层 [ncclTopoSetPaths](../nccl/src/graph/paths.cc#L52-L147)采用广度优先式扩展，但并非仅按跳数寻找普通无权最短路。当前更新优先级为：
+
+1. 路径类别更优。
+2. 类别相同，带宽模型值更大。
+3. 类别与带宽相同，跳数更少。
+
+扩展一条连接时：
+
+```cpp
+float bw = std::min(path->bw, link->bw);
+```
+
+串联路径受瓶颈链路约束。假设两段的模型值为 50 和 32，则路径值为 32。这些是由属性和规则得到的建模值，不是本阶段运行带宽测试得到的实测吞吐。
+
+常见路径类型见 [graph.h:120–158](../nccl/src/include/graph.h#L120-L158)：
+
+| 类型 | 含义 |
+|---|---|
+| `PATH_LOC` | 本地自身 |
+| `PATH_NVL` | 经过 NVLink |
+| `PATH_NVB` | 经中间 GPU 的 NVLink 路径，不是泛指经过 NVSwitch |
+| `PATH_PIX` | 至多经过一个 PCIe bridge |
+| `PATH_PXB` | 经过多个 PCIe bridges，但不经过 Host Bridge |
+| `PATH_PHB` | 经过 PCIe Host Bridge |
+| `PATH_SYS` | 经过 NUMA 节点间系统互联 |
+| `PATH_NET` | 网络路径 |
+| `PATH_DIS` | 不连通 |
+
+这些类别帮助后续代码比较路径，不是所有机器上的绝对性能排名；本节也不穷举所有特殊类型。
+
+### 13.6 物理连通不等于直接路径可用
+
+[795–826 行](../nccl/src/graph/paths.cc#L795-L826)检查 P2P 和 SHM：
+
+- 不允许或不能使用 GPU Direct P2P 时，将相关路径模型调整为经 CPU 中转。
+- 再调用 P2P/SHM transport 的 `canConnect`，结合实际能力与策略判断可用性。
+- 两者都不可用时，将相应 GPU 路径标为 `PATH_NET`，供后面裁剪本地可达域。
+
+“经 CPU”在这里表达主机侧中转，不表示 CPU 必须执行用户归约。`PATH_NET` 也不是把 rank 从 communicator 删除，而是不再将它当作可用本地 P2P/SHM 到达的同域 peer。
+
+[845–889 行](../nccl/src/graph/paths.cc#L845-L889)还会根据 GDR 条件调整 GPU↔NIC 路径；在满足特定条件时考虑 PXN：
+
+```text
+本 GPU → NVLink 相邻 GPU → 更合适的 NIC
+```
+
+因此最终路径模型不是纯硬件连线，而是“硬件连接 + 能力条件 + 配置策略”。完整 P2P/GDR/PXN 条件仍留待专项深入。
+
+### 13.7 ncclTopoTrimSystem：裁剪的是局部图，不是通信组
+
+实现：[paths.cc:900–945](../nccl/src/graph/paths.cc#L900-L945)。根据 GPU 之间的路径类型划分 domain，保留当前 rank 所属 domain 的 GPU 节点；判断包含 `path.type < PATH_NET`。
+
+目的在于让本地规划只保留同域可达 GPU，需要经网络处理的其他成员不继续充当这个局部图中的同域 GPU。
+
+它不会卸载硬件、减少 `comm->nRanks`、删除对应 `peerInfo` 或禁止后续网络通信。
+
+附近注释提到“移除不可达 GPU 和不用的 NIC”，但当前函数主体直接删除的是域外 GPU 节点，并更新：
+
+```cpp
+system->inter = system->nodes[GPU].count == comm->nRanks ? 0 : 1;
+```
+
+不能根据注释补出该实现中并不存在的 NIC 删除流程，也不能把 `system->inter` 简单等同于物理机器数是否大于 1。
+
+为什么随后必须再算一次路径？路径保存了连接指针并依赖节点索引；删节点会改变图和存储位置，旧路径不能继续使用。裁剪先清除旧路径，再删除节点，调用者随后重算。
+
+```text
+第一次 ComputePaths：为保留哪些节点提供依据
+TrimSystem：修改图并清除旧路径
+第二次 ComputePaths：为后续搜索提供有效路径
+```
+
+### 13.8 SearchInit 与 CPU 类型：准备参数，不是执行算法搜索
+
+[ncclTopoSearchInit](../nccl/src/graph/search.cc#L18-L53)计算 `system->maxBw` 和 `system->totalBw` 等带宽模型参数。`totalBw` 不是全机所有链路带宽之和；当前实现先计算各 DEV 的相关带宽值，再取最大值。
+
+真正的算法图搜索是后面的 `ncclTopoCompute`，到这里还没执行。
+
+[ncclTopoComputeCommCPU](../nccl/src/graph/search.cc#L56-L63)从当前拓扑 CPU 节点取架构与厂商，写入 `comm->cpuArch/cpuVendor`。它不计算 CPU 运算能力，也不设置线程绑定。随后 `ncclTopoPrint` 打印模型，结束本段拓扑计时。
+
+### 13.9 CPU affinity：让初始化线程尽量靠近 GPU
+
+[init.cc:1406–1412](../nccl/src/init.cc#L1406-L1412)：
+
+```cpp
+ncclTopoGetCpuAffinity(comm->topo, comm->rank, &comm->cpuAffinity);
+if (ncclOsCpuCount(comm->cpuAffinity)) {
+  ncclOsGetAffinity(&affinitySave);
+  ncclOsSetAffinity(comm->cpuAffinity);
+}
+```
+
+默认选择 [topo.cc:2447–2472](../nccl/src/graph/topo.cc#L2447-L2472)中的交集：
+
+```text
+线程当前允许的 CPU 集合 ∩ 靠近 GPU 的 CPU 集合
+```
+
+交集为空则不应用新绑定；相关配置也允许忽略原 affinity 限制，采用 GPU 邻近集合。
+
+为什么通信初始化还关心 CPU？NUMA 系统中的主机内存也有远近关系。让初始化线程靠近 GPU，有利于后续主机资源分配与访问的局部性。
+
+Linux 的 [sched_setaffinity(0, ...)](../nccl/src/os/linux.cc#L606-L622)作用于当前初始化线程，不是重绑整个应用所有线程。[函数退出时](../nccl/src/init.cc#L1977-L1978)恢复保存的 affinity。此操作不强制迁移已有内存，也不能保证所有分配绝对落在指定 NUMA 节点。
+
+**本节小结：到 `init.cc:1412`，已得到结合能力和策略修正、裁剪并重算后的硬件拓扑与路径，以及搜索参数和 CPU affinity。算法 Ring/Tree、channels、实际数据连接仍未完成；下一次从 `init.cc:1414` 继续。**
+
 <a id="remaining"></a>
 
-## 11. 特殊分支与后续流程概览
+## 14. 特殊分支与后续流程概览
 
 本节保留已经介绍过的整体轮廓，不代表这些内部实现已经逐行学完。
 
-### 11.1 Split、Shrink、Grow 的入口差异
+### 14.1 Split、Shrink、Grow 的入口差异
 
 源码：[init.cc:2136–2191](../nccl/src/init.cc#L2136-L2191)。
 
@@ -955,19 +1486,19 @@ bootstrapInit：入口、地址表、proxyState、IPC socket
 
 把共同的资源初始化与不同的成员协调分开，可以复用主要逻辑，又不强行把所有派生场景写成同一种握手。
 
-### 11.2 initTransportsRank：完整通信准备的大头
+### 14.2 initTransportsRank 剩余部分：从硬件图到可执行通信
 
-回到 [init.cc:2196](../nccl/src/init.cc#L2196)。整体职责是交换 peer 信息、分析成员关系和拓扑、规划通信图与 channels、按策略准备传输资源，并建立 GPU 使用的设备状态。
+第 11–13 节已覆盖信息交换、成员关系与硬件拓扑。下一步从 [init.cc:1414](../nccl/src/init.cc#L1414-L1437)继续 CollNet/NVLS 准备和 `ncclTopoCompute` 算法图搜索，再分析图信息协调、channels、proxy 服务启动、transport 资源及 GPU 使用的设备状态。
 
-这里不能简单概括为“初始化时一次性建好所有算法的全部连接”。源码会根据 cuMem 支持和运行时连接配置选择分支，见 [init.cc:1811](../nccl/src/init.cc#L1811)；某些连接可延迟到首次使用相关算法时建立。
+不能简单概括为“初始化时一次性建好所有算法的全部连接”。源码会根据 cuMem 支持和运行时连接配置选择分支，见 [init.cc:1811](../nccl/src/init.cc#L1811)；某些连接可延迟到首次使用相关算法时建立。
 
-后续精读会继续拆成“信息交换 → 拓扑与图 → channel/transport → 设备状态”几个阶段。宏观框架可对照 [03｜Communicator](03-communicator.md)。
+后续精读按“算法图 → channel/transport → 设备状态”逐段展开。宏观框架可对照 [03｜Communicator](03-communicator.md)。
 
 <a id="state"></a>
 
-## 12. 状态、错误与任务生命周期
+## 15. 状态、错误与任务生命周期
 
-### 12.1 完成与失败通过 initState 发布
+### 15.1 完成与失败通过 initState 发布
 
 回调执行完传输初始化后尝试启动进度计数监控；该监控失败会记日志，但不阻止初始化主线继续。随后发布成功，见 [init.cc:2198–2208](../nccl/src/init.cc#L2198-L2208)：
 
@@ -982,10 +1513,11 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 
 普通路径早已在 `ncclCommInitRankDev` 写入 `*newcomm`。回调末尾的 `if (job->newcomm)` 是可选交接，不能理解为所有普通初始化句柄都只在这个位置返回。
 
-### 12.2 四种“完成”不要混淆
+### 15.2 阶段就绪、初始化结果与 GPU 完成不要混淆
 
 | 状态或事件 | 含义 |
 |---|---|
+| `comm->peerInfoValid` | 身份与能力表已可读，不代表后续检查或初始化完成 |
 | `comm->initState` | communicator 初始化自身的结果 |
 | `job->state` | 调度任务处于 Running、Done、Joined 等状态 |
 | `comm->asyncResult` | 对外查询的异步主机操作状态/错误 |
@@ -1000,7 +1532,7 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 - 非阻塞使用者要同时检查查询函数返回值与输出的异步状态。
 - 后续 collective 返回、GroupEnd 返回或异步错误查询成功，都不能单独代替 GPU stream/event 完成判断。
 
-### 12.3 错误宏表达不同的失败策略
+### 15.3 错误宏表达不同的失败策略
 
 见 [checks.h:24–43](../nccl/src/include/checks.h#L24-L43) 和 [158–166 行](../nccl/src/include/checks.h#L158-L166)。
 
@@ -1012,7 +1544,7 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 
 失败不意味着在该标签里直接销毁所有对象；任务、comm 子资源与 Group 有各自的清理责任。不能把 `goto fail` 简化为“立即 free 整个 communicator”。
 
-### 12.4 为什么保留分阶段计时？
+### 15.4 为什么保留分阶段计时？
 
 `timers[]` 用 `clockNano()` 记录 kernel、alloc、bootstrap、拓扑、图、连接等阶段耗时，最后输出 `Init timings`。这样初始化慢时可以先判断时间花在哪一层，而不是只得到一个总时长。
 
@@ -1022,9 +1554,9 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 
 <a id="recap"></a>
 
-## 13. 阶段小结、易混点与下一步阅读
+## 16. 阶段小结、易混点与下一步阅读
 
-### 13.1 一张表复习已深入学习的过程
+### 16.1 一张表复习已深入学习的过程
 
 | 阶段 | 已得到什么 | 仍未得到什么 |
 |---|---|---|
@@ -1037,8 +1569,14 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 | bootstrap 环建立 | 相邻 ranks 的控制连接 | 全组服务地址表与算法数据通道 |
 | `ringAllInfo → bootstrapAllGather` | 每个 rank 都有全组服务联系信息 | 完整 peer 能力视图、拓扑与数据连接 |
 | `ncclProxyInit` | proxyState、监听 socket 与地址表交接、本地 IPC socket | 后续启动的 proxy 服务线程及完整传输准备 |
+| `fillInfo → bootstrapAllGather` | 全组身份与能力表，`peerInfoValid` 发布 | 后续兼容性检查和拓扑 |
+| peerInfo 检查与成员分析 | 本段能力处理、同进程编号、comm 链表与协调状态 | 硬件路径与算法图 |
+| 拓扑发现、裁剪与路径重算 | 硬件图、策略修正后的路径、搜索模型参数 | Ring/Tree 排列、channels 与实际数据连接 |
+| CPU affinity 设置 | 初始化线程的局部性选择 | 不强制迁移已有内存，不保证全部 NUMA 分配位置 |
 
-### 13.2 常见误解速查
+peerInfo 检查行按正常完整扫描路径理解；当前源码的非均匀区间 `break` 边界见第 12.1 节。
+
+### 16.2 常见误解速查
 
 | 容易误解的说法 | 准确理解 |
 |---|---|
@@ -1060,10 +1598,23 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 | bootstrap AllGather 总是单向 N−1 轮 | 当前默认 Socket 实现双向传播，共 `floor(N/2)` 轮 |
 | `bootstrapAllGather` 的 size 是整个数组大小 | 它是单个 rank 记录的字节数，数组需容纳全组记录 |
 | `ncclProxyInit` 已启动服务线程 | 它准备状态与入口；后续 `ncclProxyCreate` 才启动服务线程 |
+| `peerInfo` 分配 `nranks + 1` 表示多一个参与者 | 额外项是 CollNet root 内部槽位，真实 rank 数不变 |
+| 收到别的 rank 的 comm 指针就能解引用 | 只能在确认同进程后使用，跨进程指针不是远程句柄 |
+| `peerInfoValid` 表示全部检查已通过 | 只发布表可读，后续检查与完整初始化仍未完成 |
+| 连续主机区间长度就是每台机器的总 rank 数 | 它按 rank 顺序统计连续区间，不做任意主机分组计数 |
+| 局部 `nNodes` 已是精确节点数 | 本段按异机成员递增，用于异机判定，不等于最终 `comm->nNodes` |
+| `intraComm0` 总指向全局 rank 0 | 它指向本通信组在本进程的首个成员 |
+| `nvlsRegSupport=0` 表示不能通信或 NVLS 完全不可用 | 它只描述相关注册路径条件，不等于 `nvlsSupport` |
+| `comm->topo` 已经包含选好的算法 Ring | 它是硬件与路径模型，算法图由后续搜索产生 |
+| 路径计算只找最少跳数 | 当前实现先比较类型，再比较带宽，最后比较跳数 |
+| 拓扑路径带宽是本阶段实测结果 | 它是属性和规则形成的模型值，不是运行带宽测试 |
+| 裁剪拓扑删除了 communicator 成员 | 只修改局部图，不减少 `nRanks` 或删除 `peerInfo` |
+| SearchInit 已完成 Ring/Tree 搜索 | 它准备带宽模型参数，实际搜索在后面 |
+| CPU affinity 重绑了应用全部线程并迁移内存 | Linux 此处调整当前初始化线程，退出恢复，不强制迁移已有内存 |
 | 初始化成功表示所有算法连接都已提前建立 | 允许按需连接，首次使用时可能继续准备 |
 | 异步错误查询成功等于 GPU 数据已完成 | 还需依据 CUDA stream/event 的完成与依赖语义 |
 
-### 13.3 源码定位表
+### 16.3 源码定位表
 
 | 入口 | 对应内容 |
 |---|---|
@@ -1089,15 +1640,29 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 | [bootstrap.cc:1363](../nccl/src/bootstrap.cc#L1363-L1412) | 当前 Socket 双向环 AllGather |
 | [proxy.cc:2111](../nccl/src/proxy.cc#L2111-L2128) | `ncclProxyInit` 准备状态与 IPC socket |
 | [proxy.cc:2130](../nccl/src/proxy.cc#L2130-L2165) | 后续 `ncclProxyCreate` 启动服务线程 |
-| [init.cc:1234](../nccl/src/init.cc#L1234-L1239) | 下一步：`fillInfo → bootstrapAllGather` |
+| [init.cc:1234](../nccl/src/init.cc#L1234-L1239) | `peerInfo` 分配、交换与发布 |
+| [init.cc:888](../nccl/src/init.cc#L888-L982) | `fillInfo` 的身份与能力采集 |
+| [transport.h:46](../nccl/src/include/transport.h#L46-L74) | `ncclPeerInfo` 记录类型 |
+| [init.cc:1241](../nccl/src/init.cc#L1241-L1314) | 连续区间、兼容性检查与能力汇总 |
+| [mnnvl.cc:14](../nccl/src/mnnvl.cc#L14-L94) | MNNVL 条件与 Fabric handle 检查 |
+| [init.cc:1322](../nccl/src/init.cc#L1322-L1379) | 同进程编号、对象链表与协调状态 |
+| [init.cc:1381](../nccl/src/init.cc#L1381-L1412) | 拓扑发现、路径处理与 affinity 主线 |
+| [topo.cc:1989](../nccl/src/graph/topo.cc#L1989-L2178) | `ncclTopoGetSystem` 与 XML 融合 |
+| [topo.h:46](../nccl/src/graph/topo.h#L46-L183) | 拓扑节点、连接、路径与系统结构 |
+| [paths.cc:52](../nccl/src/graph/paths.cc#L52-L147) | 路径扩展与候选比较规则 |
+| [paths.cc:754](../nccl/src/graph/paths.cc#L754-L898) | `ncclTopoComputePaths` 与策略修正 |
+| [paths.cc:900](../nccl/src/graph/paths.cc#L900-L945) | `ncclTopoTrimSystem` 裁剪局部图 |
+| [search.cc:18](../nccl/src/graph/search.cc#L18-L63) | 搜索参数与 CPU 类型准备 |
+| [topo.cc:2447](../nccl/src/graph/topo.cc#L2447-L2490) | CPU affinity 选择 |
+| [init.cc:1414](../nccl/src/init.cc#L1414-L1437) | 下一步：CollNet/NVLS 与算法图规划 |
 
-### 13.4 当前断点与接下来的顺序
+### 16.4 当前断点与接下来的顺序
 
-**已讲解至 `bootstrapInit` 返回（`bootstrap.cc:964`），下一次回到 [init.cc:2196](../nccl/src/init.cc#L2193-L2196)，进入 `initTransportsRank`。特殊初始化分支和完整异常清理仍未逐行展开。**
+**已讲解至 `initTransportsRank` 的 CPU affinity 设置完成（`init.cc:1412`），下一次从 [init.cc:1414](../nccl/src/init.cc#L1414-L1437)继续。特殊初始化分支、完整异常清理和部分深层辅助函数仍未逐行展开。**
 
-1. 先看 [init.cc:1234–1239](../nccl/src/init.cc#L1234-L1239) 的 `fillInfo → bootstrapAllGather`：从服务联系表进一步得到各 rank 的设备、进程、主机与能力信息。
-2. 分析成员关系与能力约束，再进入 GPU/NIC 拓扑发现和路径计算。
-3. 继续算法图与 channels、proxy 服务启动、transport 资源及设备状态准备。
+1. 简要看 CollNet 支持检查与 `ncclNvlsInit`，再进入 `ringGraph/treeGraph → ncclTopoCompute`，理解硬件图如何变成算法通信图。
+2. 分析图信息交换、参数协调、节点/rank 映射与 channels。
+3. 继续 proxy 服务启动、transport 资源、连接策略与设备状态准备。
 4. 最后回看成功发布、异常处理、按需连接与首次 collective 的衔接。
 
-复习时可以先不看源码，尝试回答：unique ID、commHash、rank、comm 指针各解决什么问题？入队后是谁执行？每个阶段的产物由下一层的哪个函数消费？这几个问题能把整条初始化链路串起来。
+复习时可先不看源码，尝试回答：unique ID、commHash、rank、comm 指针各解决什么问题？入队后是谁执行？服务地址表、peerInfo、硬件图、算法图各自提供什么？为什么路径需要计算两次？每个阶段的产物由下一层的哪个函数消费？
