@@ -61,13 +61,14 @@ transport 按所选路径补充 MR、IPC 等状态，使长期复用缓冲可减
 
 | 机制 | 改变的层与基本条件 |
 |---|---|
-| NVLS | GPU 使用 multicast/multimem 访问与规约，transport 管理 multicast 映射；需要支持该能力的 NVLink 域。基线设备实现从 CUDA 12.1、SM90 起 |
-| CollNet | 通过集合网络插件汇聚、规约、分发；网络实现提供对应 collective 回调及类型/规约支持，GPU 仍承担域内工作 |
-| MNNVL | 通过 NVLink fabric 扩大跨物理节点的 load/store 访问范围；需要 cuMem、FABRIC handle、已就绪的 fabric 和 IMEX 内存导入导出服务 |
+| [NVLS](appendix-nvls.md) | GPU 使用 multicast/multimem 访问与规约，transport 管理 multicast 映射；需要支持该能力的 NVLink 域。基线设备实现从 CUDA 12.1、SM90 起 |
+| [CollNet](appendix-collnet.md) | 通过集合网络插件汇聚、规约、分发；网络实现提供对应 collective 回调及类型/规约支持，GPU 仍承担域内工作 |
+| [MNNVL](appendix-mnnvl.md) | 通过 NVLink fabric 扩大跨物理节点的 load/store 访问范围；需要 cuMem、FABRIC handle、已就绪的 fabric 和 IMEX 内存导入导出服务 |
 
 三者可以组合：域内由 NVLS 处理，域间再连接其他路径。
 MNNVL 首先改变拓扑与映射范围，算法仍由调优器从可用候选中选择。
 开发时分别定位能力发现、transport 资源和设备实现，职责会比特性名称更清楚。
+设备标识、P2P/NVLink 状态和 fabric 信息的查询方式，见 [NVML 专题](appendix-nvml.md)。
 
 **PAT** 为 AllGather 和 ReduceScatter 提供分阶段聚合、传播的数据交换方案。本版多 rank 节点的 PAT 还可借用 NVLS 做节点内传输；从 [generate.py:104](../nccl/src/device/generate.py#L104) 的集合候选表和 [init.cc:1833](../nccl/src/init.cc#L1833) 的连接顺序进入实现。
 

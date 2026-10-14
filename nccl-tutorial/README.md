@@ -44,6 +44,10 @@
 - [nccl-tests](appendix-nccl-tests.md)：参数、计时与输出列。
 - [性能分析](appendix-performance.md)：延迟/带宽模型、对照实验、计算通信重叠。
 - [现代特性](appendix-modern-features.md)：Graph、NVLS、Device API、GIN、RMA 等扩展入口。
+- [NVML：GPU 管理与观测](appendix-nvml.md)：设备标识、状态查询，以及 NCCL 如何获取拓扑与 fabric 信息。
+- [CollNet：集合网络通信](appendix-collnet.md)：网络插件的职责，以及 Direct、Chain 两种节点内数据流。
+- [MNNVL：跨节点 NVLink](appendix-mnnvl.md)：fabric 分组、远端显存映射与跨 host P2P。
+- [NVLS：NVLink 硬件归约](appendix-nvls.md)：multicast/multimem、AllReduce 数据流及与 MNNVL、CollNet 的分工。
 
 每章保留少量关键源码入口，以及一项能核对结果的阅读或实验任务。先读懂正文中的交接关系，再去源码找对应对象；完整 API 清单与特殊路径留在附录。
 
