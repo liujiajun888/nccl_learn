@@ -129,6 +129,20 @@ NCCL：接手成员交换、拓扑与资源准备
 
 [第 04 章](04-topology.md)展开从硬件图到邻接关系的过程，[第 05 章](05-transports.md)展开从邻接关系到可访问资源的过程。
 
+**图搜索完成后，还要经过一次全局协调，才能形成所有 rank 一致的 Ring/Tree。** 普通新建 communicator 的主要交接是：
+
+```text
+各 rank 的 ncclTopoCompute
+  → ncclTopoPreset：提取本地 Ring/Tree 端点与邻居摘要
+  → bootstrapAllGather：交换 graphInfo + topoRanks
+  → 建立 rankToNode/localRank，并对齐 channel 数、带宽和路径约束
+  → ncclTopoPostset：拼接跨节点邻接，生成并校验 rings
+```
+
+这里交换的不是整张 `ncclTopoSystem`，而是两类摘要：`graphInfo` 保存 channel 数、带宽和路径约束，`topoRanks` 保存局部段的连接端点。`ringRecv/ringSend` 是局部 Ring 段的入口和出口，**不是当前 rank 自己的 recv/send peer**；当前 rank 的局部前后邻居另由 `ringPrev/ringNext` 表示，跨节点边界则由 Postset 补齐。
+
+因此，`ncclTopoCompute` 的输出只是局部算法布局；`ncclTopoPostset` 之后，`comm->channels[c]` 中的 `ring.prev/next` 和 `tree.up/down` 才是后续 transport 使用的全局逻辑邻接。`ncclBuildRings` 还会沿 `next` 走完整环，检查回到起点且覆盖所有 rank。
+
 ### 4.4 主机状态 → GPU 可用的执行上下文
 
 `devCommSetup` 创建普通通信 kernel 使用的 `ncclKernelComm` 与设备 channel，填入 rank、协议缓冲大小、设备地址和终止标志等信息，同时准备 work FIFO 等存储。
@@ -181,8 +195,10 @@ r5 的进程只看到 GPU B1，因而选择 device 0；应用交给它 `nranks=8
 | [init.cc:2851 · `ncclCommInitRankDev`](../nccl/src/init.cc#L2851) | 创建 comm、复制 ID、提交 init job |
 | [init.cc:2105 · `ncclCommInitRankFunc`](../nccl/src/init.cc#L2105) | 2190 行进入 bootstrap，2196 行进入资源准备，2207 行发布成功 |
 | [bootstrap.cc:754 · `bootstrapInit`](../nccl/src/bootstrap.cc#L754) | 会合、控制连接和联系地址交换 |
-| [init.cc:1163 · `initTransportsRank`](../nccl/src/init.cc#L1163) | 1236～1238 行收齐 peerInfo，1391 行进入拓扑，1811 行决定连接策略 |
+| [init.cc:1163 · `initTransportsRank`](../nccl/src/init.cc#L1163) | 1236～1238 行收齐 peerInfo，1381 行进入拓扑，1414 行开始图搜索，1531～1733 行协调并拼接布局，1811 行决定连接策略 |
+| [search.cc:1151 · `ncclTopoCompute`](../nccl/src/graph/search.cc#L1151) | 硬件路径怎样变成局部 Ring/Tree 图；[connect.cc:20、380](../nccl/src/graph/connect.cc#L20) 是 Preset/Postset |
 | [init.cc:712 · `devCommSetup`](../nccl/src/init.cc#L712) | 主机状态怎样变成设备 comm、channel 和描述存储；调用处在 1952 行 |
+| [generic.cc:14、49 · Ring/Tree transport connect](../nccl/src/transport/generic.cc#L14) | 读取逻辑邻居，登记并用 `ncclTransportP2pSetup` 完成实际连接 |
 | [group.cc:824–828 · 首轮连接 job](../nccl/src/group.cc#L824) | 结合 [enqueue.cc:572](../nccl/src/enqueue/enqueue.cc#L572)，追踪需求产生与连接完成 |
 
 **离线任务：给 r5 画一张四行交接表。** 每行写出“执行者 → 产物 → 下一消费者”：

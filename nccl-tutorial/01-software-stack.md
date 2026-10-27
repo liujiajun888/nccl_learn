@@ -118,6 +118,39 @@ Host 任务：这次要通信多少数据，使用什么操作
 
 它们的连接比字段数量重要。例如 `ncclDevWorkColl` 的输入地址来自应用，channel 的邻居来自初始化，协议中的进度由 GPU 或 proxy 更新。一个 kernel 同时使用这三类信息，才能完成通信。
 
+### 源码目录地图：知道该去哪一层找证据
+
+教程中的“层”最终都落在具体目录里。先看目录职责，再看函数名，可以避免把相邻但不同的机制混在一起。
+
+| 目录或文件 | 主要职责 | 对应阅读 |
+|---|---|---|
+| `src/nccl.h.in`、`src/collectives.cc` | 公开 API、参数与 collective 入口 | 02、集合接口附录 |
+| `src/init.cc`、`src/bootstrap.cc` | communicator 创建、成员会合、初始化和收尾 | 03、初始化精读 |
+| `src/graph/` | XML/硬件拓扑、路径、图搜索、Ring/Tree 拼接 | 04 |
+| `src/transport.cc`、`src/transport/` | transport 选择、连接协调、P2P/SHM/NET 及专用传输 | 05、09 |
+| `src/group.cc`、`src/enqueue/` | Group 调度、task、plan、work 上传、launch 和回收 | 06、10、11 |
+| `src/device/`、`src/include/device.h` | GPU 算法、协议原语、device 工作描述和函数分派 | 07、08 |
+| `src/proxy.cc` | proxy service、op pool、网络工作推进 | 09 |
+| `src/plugin/`、`src/include/plugin/` | NET、Tuner、Profiler、GIN、RMA 等插件契约与加载 | 05、09、现代特性附录 |
+| `src/tuning/` | 算法/协议候选筛选、成本模型和资源阈值 | 04、06、08、性能附录 |
+| `src/allocator.cc`、`src/register/`、`src/mem_manager.cc` | 分配、用户注册、映射和内部内存管理 | 10、现代特性附录 |
+| `src/dev_runtime*.cc`、`src/devcomm/`、`src/gin/`、`src/rma/`、`src/ce_coll.cc` | Device API、对称窗口、设备发起网络、RMA 和 copy-engine 路径 | 现代特性附录 |
+| `src/os/`、`src/misc/`、`src/include/` | OS 抽象、公共内部数据结构、同步与工具函数 | 各章按需查阅 |
+| `src/device/generate.py`、`src/device/Makefile`、`makefiles/` | 设备组合生成、device link 和主库构建 | 00、11 |
+
+`src/include/` 主要放 NCCL 内部契约，不能整体当作应用公开 API；应用公开声明主要来自 `src/nccl.h.in` 和 `src/include/nccl_device/` 等公开头文件。设备生成源码位于构建目录，不应把生成物当成唯一的手写实现来修改。
+
+一条实用的目录追踪顺序是：
+
+```text
+API/collectives
+  → init/bootstrap
+  → graph/transport
+  → group/enqueue
+  → device/proxy
+  → tuning/register/dev_runtime（按问题深入）
+```
+
 ### 源码起点
 
 - [nccl/src/collectives.cc:192](../nccl/src/collectives.cc#L192)：`ncclAllReduceConfigImpl` 把 API 参数放入 `ncclInfo`。

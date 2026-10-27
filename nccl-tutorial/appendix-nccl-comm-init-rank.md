@@ -1,13 +1,13 @@
-# ncclCommInitRank 源码精读：从 API 入口到拓扑与路径
+# ncclCommInitRank 源码精读：从 API 入口到 device 端通信器
 
 这篇文档汇总已经讲解过的 communicator 初始化链路，按“做了什么、为什么需要、给下一步留下什么”组织，便于反复查阅。它是 [03｜Communicator](03-communicator.md) 的逐段阅读补充，不是全部 NCCL API 的清单。
 
 - 源码基线：NCCL **2.32.3**，提交 `12df1a11afad322be5a204a2db890161cbf8131d`。
-- 最近整理：2026-10-13。源码链接指向本地仓库；换版本后请按符号重新定位。
+- 源码链接指向本地仓库；换版本后请按符号重新定位。
 - 主线假设：普通新建 communicator、单 unique ID、未设置 `NCCL_COMM_ID`、默认 Socket bootstrap；OS 相关机制主要按 Linux 路径解释。
 - 调度主线：`NCCL_ENQUEUE_REARCH_ENABLE=0`；同时说明阻塞/非阻塞和新入队路径的差异。
-- **当前精读进度：已覆盖 `initTransportsRank` 的 peerInfo 交换、能力与成员关系处理、硬件拓扑、路径裁剪重算和 CPU affinity，即 `init.cc:1412`。下一步从第 1414 行进入 CollNet/NVLS 准备与算法图规划。**
-- 后续算法图、channels、实际传输资源和初始化收尾仍保留概览；特殊分支、完整异常清理及部分深层辅助函数未逐行展开。
+- **阅读范围：普通新建 communicator 的完整初始化主线，覆盖 peerInfo、拓扑、算法图、全局图拼接、P2P/proxy、transport 连接、tuning、`devCommSetup` 和收尾。**
+- 深入边界：Split/Shrink/Grow、特殊硬件分支、完整异常清理及部分深层辅助函数保留概览；普通主线之外的内容按专题继续阅读。
 
 文中的代码片段是教学节选或简化逻辑，省略了部分日志、错误处理和分支，不是可以直接编译运行的完整程序。本文基于源码阅读整理，未进行 GPU 运行验证。
 
@@ -26,9 +26,11 @@
 11. [initTransportsRank 首段：收集身份与能力，发布 peerInfo](#peer-info)
 12. [消费 peerInfo：兼容性、共同能力与同进程成员](#peer-checks)
 13. [硬件拓扑与路径：建图、裁剪、重算和 CPU affinity](#topology)
-14. [特殊分支与后续流程概览](#remaining)
+14. [算法图、全局连接与 device 状态](#remaining)
 15. [状态、错误与任务生命周期](#state)
-16. [阶段小结、易混点与下一步阅读](#recap)
+16. [完整主线小结、易混点与进阶阅读](#recap)
+
+**使用方式：**第一次阅读按 1→16；已经读过 [03｜Communicator](03-communicator.md) 的读者可直接看第 14 节补齐后半段；复习时优先看 16.1–16.3。第 14 节与正文的拓扑、transport 和 host/device 执行章节相互参照，不要求一次逐行读完所有辅助函数。
 
 <a id="map"></a>
 
@@ -1467,15 +1469,15 @@ if (ncclOsCpuCount(comm->cpuAffinity)) {
 
 Linux 的 [sched_setaffinity(0, ...)](../nccl/src/os/linux.cc#L606-L622)作用于当前初始化线程，不是重绑整个应用所有线程。[函数退出时](../nccl/src/init.cc#L1977-L1978)恢复保存的 affinity。此操作不强制迁移已有内存，也不能保证所有分配绝对落在指定 NUMA 节点。
 
-**本节小结：到 `init.cc:1412`，已得到结合能力和策略修正、裁剪并重算后的硬件拓扑与路径，以及搜索参数和 CPU affinity。算法 Ring/Tree、channels、实际数据连接仍未完成；下一次从 `init.cc:1414` 继续。**
+**本节小结：到 `init.cc:1412`，已得到结合能力和策略修正、裁剪并重算后的硬件拓扑与路径，以及搜索参数和 CPU affinity。下一节继续把这些硬件路径变成算法图，再完成全局协调、实际连接和 device 状态发布。**
 
 <a id="remaining"></a>
 
-## 14. 特殊分支与后续流程概览
+## 14. 算法图、全局连接与 device 状态：完成 initTransportsRank
 
-本节保留已经介绍过的整体轮廓，不代表这些内部实现已经逐行学完。
+第 11–13 节已经得到成员信息、共同能力和硬件路径。本节把普通新建 communicator 的剩余主线接完：先搜索局部算法图，再交换摘要并拼接全局 Ring/Tree，最后准备 transport、proxy 和 device 端状态。
 
-### 14.1 Split、Shrink、Grow 的入口差异
+### 14.1 特殊入口先放在边界
 
 源码：[init.cc:2136–2191](../nccl/src/init.cc#L2136-L2191)。
 
@@ -1484,15 +1486,175 @@ Linux 的 [sched_setaffinity(0, ...)](../nccl/src/os/linux.cc#L606-L622)作用�
 - **Grow：**与普通初始化同属 `else` 大分支，但 hash、旧成员信息和 bootstrap 会合方式有特殊处理，不能直接套普通单 ID 图。
 - **普通 INIT：**使用第一个 ID 内容的 hash，`commAlloc` 不复用父组资源，然后 `bootstrapInit`。
 
-把共同的资源初始化与不同的成员协调分开，可以复用主要逻辑，又不强行把所有派生场景写成同一种握手。
+共同的资源初始化可以复用，但成员协调方式不必相同。下面的完整主线聚焦普通 INIT。
 
-### 14.2 initTransportsRank 剩余部分：从硬件图到可执行通信
+### 14.2 从硬件路径到算法图：`ncclTopoCompute`
 
-第 11–13 节已覆盖信息交换、成员关系与硬件拓扑。下一步从 [init.cc:1414](../nccl/src/init.cc#L1414-L1437)继续 CollNet/NVLS 准备和 `ncclTopoCompute` 算法图搜索，再分析图信息协调、channels、proxy 服务启动、transport 资源及 GPU 使用的设备状态。
+主线：[init.cc:1414–1468](../nccl/src/init.cc#L1414-L1468)。
 
-不能简单概括为“初始化时一次性建好所有算法的全部连接”。源码会根据 cuMem 支持和运行时连接配置选择分支，见 [init.cc:1811](../nccl/src/init.cc#L1811)；某些连接可延迟到首次使用相关算法时建立。
+先做能力检查：
 
-后续精读按“算法图 → channel/transport → 设备状态”逐段展开。宏观框架可对照 [03｜Communicator](03-communicator.md)。
+- `collNetSupport` 主要检查集合网络插件上下文是否存在；没有插件就关闭 `collnetEnable`。
+- `ncclNvlsInit` 检查 NVLS 的硬件、驱动和配置条件，设置 `nvlsSupport`。它本身不分配完整 NVLS 运行资源。
+
+随后为 Ring、Tree、CollNet Chain/Direct、NVLS 准备 `ncclTopoGraph`。这个结构和前面的 `ncclTopoSystem` 不同：
+
+| 对象 | 回答的问题 |
+|---|---|
+| `ncclTopoSystem` | 硬件怎样连接，端点之间有哪些路径？ |
+| `ncclTopoGraph` | 某种算法在每个 channel 中怎样排列 GPU、使用哪些网络入口和出口？ |
+
+`intra[]` 记录局部 rank 顺序，`inter[]` 记录网络端点 ID；`nChannels、bwIntra、bwInter、typeIntra、typeInter` 等字段描述搜索结果和估计约束。图搜索仍是在内存模型中规划，不是建立数据连接。
+
+[`ncclTopoCompute`](../nccl/src/graph/search.cc#L1151-L1393) 的外层策略可以概括为：
+
+```text
+设定 channel 数范围、路径类别上限和候选带宽
+  → 递归尝试 GPU/NIC 排列，并按链路剩余带宽记账
+  → 结果不够好时放宽条件或降低单 channel 带宽
+  → 复制可行 channel，尝试在不减少 channel 数的前提下提速
+  → Ring/Tree 仍无结果时使用简单顺序兜底
+```
+
+递归内部的 `graph` 是当前草稿，`saveGraph` 是已保存的最好结果；候选失败会归还带宽并回溯。对普通主线的理解到这里就足够，候选排序、crossNic 细节和 NVLS 特殊分支可留作进阶。
+
+### 14.3 AllGather3：从局部图到全组一致参数
+
+图搜索在每个 rank 的局部域上独立完成。接下来需要交换摘要，而不是再次交换完整拓扑：
+
+```text
+本地图
+  → ncclTopoPreset
+  → allGather3Data[rank]
+  → bootstrapAllGather
+  → 全组参数对齐与 node/localRank 组织
+  → ncclTopoPostset
+```
+
+#### Preset 提取什么？
+
+[`ncclTopoPreset`](../nccl/src/graph/connect.cc#L20-L93) 将每个 channel 的局部图压缩为 `topoRanks`：
+
+- `ringRecv/ringSend`：局部 Ring 段的第一个和最后一个 rank，供 node 间拼接。
+- `ringPrev/ringNext`：当前 rank 在局部段中的前后邻居，边界先记为 -1。
+- `treeToParent/treeToChild*`：局部 Tree 的连接端点。
+- `nvlsHeads`：去重后的 NVLS head rank。
+
+`ringRecv/ringSend` 不是当前 rank 自己的 recv/send peer。Preset 还会把前 `nChannels` 个 channel 复制到后半槽位，为后续两套 Tree 运行时连接做准备；这不是再次搜索，也不是建立 transport。
+
+#### AllGather 交换什么？
+
+[`allGatherInfo`](../nccl/src/init.cc#L1192-L1206) 主要包含：
+
+- `graphInfo`：各算法的 channel 数、带宽、路径类型、`sameChannels`、`crossNic` 等标量。
+- `topoRanks`：上面的局部连接摘要。
+- CPU、网络设备数量与带宽、NVLink 状态和 P2P 参数。
+
+[`bootstrapAllGather`](../nccl/src/init.cc#L1533) 后，每个 rank 都有全组的这些记录。代码再用 `ringRecv[0]` 识别 NCCL 连接模型中的 node，建立 `rankToNode`、`rankToLocalRank` 和 `nodeRanks`。这里的 node 通常对应主机，也可以是 NVLink 局部域，不能在所有场景下简单等同于物理机器。
+
+#### 为什么还取舍最小值和最大值？
+
+[`1687–1702 行`](../nccl/src/init.cc#L1687-L1702) 对每个算法统一参数：
+
+| 字段 | 对齐方式 | 目的 |
+|---|---|---|
+| `nChannels`、`bwIntra`、`bwInter` | 取最小值 | 不超过任何 rank 已准备的数量和保守带宽估计 |
+| `sameChannels` | 取最小值 | 只要有 rank 需要不同排列，就统一允许不同排列 |
+| `typeIntra/typeInter`、`crossNic` | 取最大值 | 对齐到更宽松的路径/网络约束 |
+| `p2pnChannelsPerPeer` | 取最小值 | 不超过各 rank 的 P2P 资源能力 |
+| `p2pMaxPeers` | 取最大值 | 让全局调度覆盖最大的 peer 数 |
+
+最后 Ring 和 Tree 再取共同的最小 channel 数；CollNet Chain 或 NVLS 图对齐后为 0 个 channel 时关闭对应能力，CollNet 还要通过 node 数门槛检查。
+
+### 14.4 Postset：把局部段拼成全局 Ring/Tree
+
+[`ncclTopoPostset`](../nccl/src/graph/connect.cc#L380-L533) 使用各 rank 的 `topoRanks` 和 node 信息，完成真正的全局邻接拼接。
+
+以两个局部 Ring 段为例：
+
+```text
+node 0：0 → 1，入口 0、出口 1
+node 1：2 → 3，入口 2、出口 3
+```
+
+[`connectRings`](../nccl/src/graph/connect.cc#L95-L113) 只补 node 边界：
+
+```text
+next[1] = 2，prev[2] = 1
+next[3] = 0，prev[0] = 3
+```
+
+于是得到全局 Ring：
+
+```text
+0 → 1 → 2 → 3 → 0
+```
+
+Tree 则由 [`connectTrees`](../nccl/src/graph/connect.cc#L138-L176) 按 node 间树形和局部端点设置 `tree.up/down`，并使用 Preset 准备的两套 channel 槽位。之后还会按运行时规则复制或调整 channel 数，所以**图搜索得到的 nChannels 不是最终运行时 channel 数**。
+
+最后 [`ncclBuildRings`](../nccl/src/graph/rings.cc#L29-L74) 从当前 rank 沿 `next` 走 `nRanks` 步，生成每个 channel 的 `rings[]`，并检查是否回到起点、是否覆盖全部 rank。到这里才有完整的逻辑 Ring/Tree；实际 P2P/SHM/NET 连接仍未因此全部建立。
+
+### 14.5 准备运行参数、共享资源和 proxy
+
+主线：[init.cc:1755–1810](../nccl/src/init.cc#L1755-L1810)。
+
+1. **`computeBuffSizes`**：确定 LL/LL128/SIMPLE 的 buffer 大小和 P2P chunk 大小。多 node、全 NVLink 单 node、其他单 node 场景采用不同的 chunk 参考值，并受 SIMPLE buffer 和 parent 限制。
+2. **`ncclTopoComputeP2pChannels`**：分别确定 collective 的 `nChannels`、P2P 总 channel 数和每 peer channel 数；按配置和共享 parent 限制调整为合适的 2 的幂，并初始化额外 P2P channel。
+3. **共享资源**：在 proxy 操作前保存 top parent 的 channel、localRank 和 rank 映射，建立 `topParentLocalRanks`，避免 split comm 错用不同编号空间。
+4. **P2P 类型检查**：`ncclTransportCheckP2pType` 得到 `isAllDirectP2p`、`directMode`、`isAllCudaP2p`，这些只是能力标志。
+5. **proxy service**：可共享时复用 parent 的 `proxyState`，否则由 [`ncclProxyCreate`](../nccl/src/proxy.cc#L2130-L2166) 启动 service/UDS 线程。此前的 `ncclProxyInit` 只是准备状态和入口。
+
+随后 [`ncclP2pSchedule`](../nccl/src/init.cc#L1083-L1161) 为每个 rank 生成 `(sendRank, recvRank)` 调度项。它先把各 node 的 rank 分组，再用组间 `groupDelta` 和组内偏移错开通信顺序，目标是覆盖配对关系并减少所有 rank 同时按同一顺序访问 peer 的竞争。它是 P2P 调度表，不是 collective Ring 的顺序。
+
+### 14.6 `setupChannel` 与实际 transport 连接
+
+两种连接模式都会先对每个 collective channel 调用 [`setupChannel`](../nccl/src/init.cc#L984-L1000)：
+
+- `initChannel` 准备 host/device peer 数组、ring 映射和相关共享资源。
+- 将 Postset 的 `rings` 转成当前 rank 的 `ring.userRanks`、`rankToIndex` 和相对 `ring.index`。
+
+例如全局 Ring 为 `0→1→2→3→0`，当前 rank 为 2，则 device 可使用从 2 开始的顺序 `[2,3,0,1]`，同时保留 rank 到环位置的反向映射。
+
+#### 非 runtimeConn：初始化阶段 eager 建连
+
+[`ncclTransportRingConnect`](../nccl/src/transport/generic.cc#L14-L47) 和 [`ncclTransportTreeConnect`](../nccl/src/transport/generic.cc#L49-L67) 先登记需求，再由 [`ncclTransportP2pSetup`](../nccl/src/transport.cc#L125-L250) 完成传输准备：
+
+```text
+ncclTransportP2pConnect：connectSend/connectRecv 位图登记
+  → selectTransport 选择 P2P/SHM/NET 等实现
+  → setup 产生 ncclConnect 描述
+  → bootstrap 交换描述
+  → connect 完成映射/握手并标记 connected
+```
+
+Ring 为每个 channel 登记前驱接收和后继发送；Tree 登记 parent/children 两个方向。非 runtime 分支随后继续做 NVLS、PAT、NVLS Tree、CollNet、proxy shared init 和可选的 NVB 预连接。
+
+#### runtimeConn：按算法首次使用再建连
+
+```cpp
+comm->runtimeConn = comm->cuMemSupport && ncclParamRuntimeConnect();
+```
+
+runtime 分支在初始化时只做 `setupChannel`、NVLS setup 和适用的 CollNet setup。后续任务第一次选择某算法时，再由 [`ncclCollPreconnect`](../nccl/src/group.cc#L226-L280) 调用相同的 Ring/Tree/NVLS/CollNet/PAT 连接函数。
+
+因此，**runtimeConn 是延迟连接，不是省略连接**；首轮 collective 可能承担额外建连成本。
+
+### 14.7 tuning、device 端发布与收尾
+
+[`ncclTuningInit`](../nccl/src/tuning/tuning.cc#L44-L107) 初始化 cost model、tuner 插件和线程阈值，为之后按 collective、消息大小和资源选择算法提供模型；它不是此刻为所有 collective 选定唯一算法。
+
+随后代码根据全组共同能力计算 GIN、RMA、symmetric 等高级特性标志。普通 Ring/Tree 不依赖这些可选能力。
+
+[`devCommSetup`](../nccl/src/init.cc#L712-L853) 是 host 状态交给 device 的关键步骤：
+
+- 分配 device 端 `ncclKernelCommAndChannels`，让 `comm->devComm` 指向 device 内存中的 communicator。
+- 复制 rank、node、buffer、P2P、rank 映射和 channel 的 ring/tree/collnet/nvls 元数据。
+- 将 `ring.userRanks` 等 host 指针替换为 `devRingUserRanks` 等 device 指针，再复制实际数组内容。
+- 准备工作 FIFO、profiler 计数器和可选的 RAS counters，并同步 device stream。
+
+之后创建 profiler 线程；如果启用 RMA eager init，再提前建立相应 signal/proxy 资源。最后执行 [`bootstrapIntraNodeBarrier`](../nccl/src/init.cc#L1968-L1971)，只同步当前 NCCL node 内的 rank，确保本地共享资源准备完成。
+
+统一 `exit` 路径恢复初始化前保存的 CPU affinity，按共享资源条件处理 proxy shm，并释放 AllGather、Postset 等临时数组。**到这里，普通新建 communicator 的 `initTransportsRank` 主线完成；特殊算法的深层实现和派生 communicator 路径属于后续专题。**
 
 <a id="state"></a>
 
@@ -1546,7 +1708,7 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 
 ### 15.4 为什么保留分阶段计时？
 
-`timers[]` 用 `clockNano()` 记录 kernel、alloc、bootstrap、拓扑、图、连接等阶段耗时，最后输出 `Init timings`。这样初始化慢时可以先判断时间花在哪一层，而不是只得到一个总时长。
+`timers[]` 用 `clockNano()` 记录 kernel、alloc、bootstrap、AllGather、拓扑、图、连接等阶段耗时，最后输出 `Init timings`。其中 `TIMER_INIT_ALLGATHER` 还包含图摘要协调和 Postset，`TIMER_INIT_CONNECT` 还包含 P2P schedule、连接、tuning 和 `devCommSetup`。这样初始化慢时可以先判断时间花在哪一层，而不是只得到一个总时长。
 
 回调的总计时从回调开始算起，不包含此前等待 GroupEnd 的全部时间，也不能直接等同于从 `ncclGetUniqueId` 开始的应用端总耗时。
 
@@ -1554,7 +1716,7 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 
 <a id="recap"></a>
 
-## 16. 阶段小结、易混点与下一步阅读
+## 16. 完整主线小结、易混点与进阶阅读
 
 ### 16.1 一张表复习已深入学习的过程
 
@@ -1573,6 +1735,10 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 | peerInfo 检查与成员分析 | 本段能力处理、同进程编号、comm 链表与协调状态 | 硬件路径与算法图 |
 | 拓扑发现、裁剪与路径重算 | 硬件图、策略修正后的路径、搜索模型参数 | Ring/Tree 排列、channels 与实际数据连接 |
 | CPU affinity 设置 | 初始化线程的局部性选择 | 不强制迁移已有内存，不保证全部 NUMA 分配位置 |
+| 算法图搜索 | 各 rank 局部域的 Ring/Tree 等图 | 全组统一参数和跨节点邻接 |
+| AllGather、Preset/Postset | `graphInfo`、`topoRanks`、node/localRank、`rings` 和 channel 邻接 | 实际 transport 资源与设备状态 |
+| buffer、P2P、proxy、schedule | buffer/chunk 参数、P2P channel、proxy service、P2P 调度表 | 具体 peer 的实际连接 |
+| transport、tuning、`devCommSetup` | 连接资源、调优模型、device 端 comm/channel 和工作存储 | 后续 collective 的任务选择与执行 |
 
 peerInfo 检查行按正常完整扫描路径理解；当前源码的非均匀区间 `break` 边界见第 12.1 节。
 
@@ -1613,6 +1779,12 @@ peerInfo 检查行按正常完整扫描路径理解；当前源码的非均匀�
 | CPU affinity 重绑了应用全部线程并迁移内存 | Linux 此处调整当前初始化线程，退出恢复，不强制迁移已有内存 |
 | 初始化成功表示所有算法连接都已提前建立 | 允许按需连接，首次使用时可能继续准备 |
 | 异步错误查询成功等于 GPU 数据已完成 | 还需依据 CUDA stream/event 的完成与依赖语义 |
+| `ncclTopoCompute` 已经生成全局 Ring | 它先在局部域搜索；AllGather/Preset/Postset 才协调并拼接全局布局 |
+| `ringRecv/ringSend` 是当前 rank 的收发 peer | 它们是局部 Ring 段的入口和出口；当前邻居看 `ringPrev/ringNext` 和最终 channel |
+| `ncclTopoPostset` 完成实际传输连接 | 它生成逻辑邻接和 `rings`；实际连接由 transport/P2pSetup 或运行时 preconnect 完成 |
+| `ncclProxyCreate` 建立所有网络连接 | 它启动或复用 proxy 服务；具体连接仍由 transport 和 proxy 后续处理 |
+| `runtimeConn` 不建立连接 | 它将部分连接延迟到算法首次使用，后续由 `ncclCollPreconnect` 补齐 |
+| `devCommSetup` 启动一次 AllReduce | 它只准备 device 端 communicator、channel 和工作存储，不发起用户 collective |
 
 ### 16.3 源码定位表
 
@@ -1654,15 +1826,40 @@ peerInfo 检查行按正常完整扫描路径理解；当前源码的非均匀�
 | [paths.cc:900](../nccl/src/graph/paths.cc#L900-L945) | `ncclTopoTrimSystem` 裁剪局部图 |
 | [search.cc:18](../nccl/src/graph/search.cc#L18-L63) | 搜索参数与 CPU 类型准备 |
 | [topo.cc:2447](../nccl/src/graph/topo.cc#L2447-L2490) | CPU affinity 选择 |
-| [init.cc:1414](../nccl/src/init.cc#L1414-L1437) | 下一步：CollNet/NVLS 与算法图规划 |
+| [init.cc:1414–1468](../nccl/src/init.cc#L1414-L1468) | CollNet/NVLS 检查与各类 `ncclTopoGraph` 的建立 |
+| [search.cc:1151](../nccl/src/graph/search.cc#L1151) | `ncclTopoCompute`：局部算法图搜索、放宽、复制、提速和兜底 |
+| [init.cc:1531](../nccl/src/init.cc#L1531) | `ncclTopoPreset` 与 AllGather3 的入口；1533 行交换图摘要 |
+| [init.cc:1542–1711](../nccl/src/init.cc#L1542-L1711) | node/localRank 组织、全局图参数对齐和最终 channel 数 |
+| [connect.cc:20、380](../nccl/src/graph/connect.cc#L20) | `ncclTopoPreset`、`ncclTopoPostset`；95、138 行分别为 Ring/Tree 拼接 |
+| [rings.cc:29](../nccl/src/graph/rings.cc#L29) | `ncclBuildRings` 生成并校验完整 Ring |
+| [init.cc:1755–1810](../nccl/src/init.cc#L1755-L1810) | buffer、P2P channel、sharedRes、proxy 和 P2P schedule |
+| [init.cc:984](../nccl/src/init.cc#L984) | `setupChannel`：rings 转为当前 rank 的运行时 channel 元数据 |
+| [generic.cc:14、49](../nccl/src/transport/generic.cc#L14) | Ring/Tree transport connect；[transport.cc:46、125](../nccl/src/transport.cc#L46) 是需求登记与通用建连 |
+| [init.cc:1811](../nccl/src/init.cc#L1811) | `runtimeConn` 的 eager/lazy 连接分支 |
+| [group.cc:226](../nccl/src/group.cc#L226) | 首次使用算法时的 `ncclCollPreconnect` |
+| [tuning/tuning.cc:44](../nccl/src/tuning/tuning.cc#L44) | `ncclTuningInit` 初始化调优模型 |
+| [init.cc:1898–1978](../nccl/src/init.cc#L1898-L1978) | tuning、能力标志、`devCommSetup`、profiler、barrier 和 affinity 恢复 |
+| [init.cc:712](../nccl/src/init.cc#L712) | `devCommSetup`：host 状态到 device 端 comm/channel |
 
-### 16.4 当前断点与接下来的顺序
+### 16.4 普通主线已完整，进阶阅读按问题继续
 
-**已讲解至 `initTransportsRank` 的 CPU affinity 设置完成（`init.cc:1412`），下一次从 [init.cc:1414](../nccl/src/init.cc#L1414-L1437)继续。特殊初始化分支、完整异常清理和部分深层辅助函数仍未逐行展开。**
+普通新建 communicator 的初始化主线已经完整：
 
-1. 简要看 CollNet 支持检查与 `ncclNvlsInit`，再进入 `ringGraph/treeGraph → ncclTopoCompute`，理解硬件图如何变成算法通信图。
-2. 分析图信息交换、参数协调、节点/rank 映射与 channels。
-3. 继续 proxy 服务启动、transport 资源、连接策略与设备状态准备。
-4. 最后回看成功发布、异常处理、按需连接与首次 collective 的衔接。
+1. 公开 API、init job 和 Group 调度。
+2. `commHash`、`commAlloc`、unique ID、bootstrap 和 proxy 入口。
+3. `peerInfo`、共同能力、同进程成员和硬件拓扑。
+4. 算法图搜索、AllGather/Preset/Postset 和全局 Ring/Tree。
+5. buffer、P2P schedule、proxy、transport 连接与 runtimeConn。
+6. tuning、`devCommSetup`、profiler、节点内 barrier 和清理。
 
-复习时可先不看源码，尝试回答：unique ID、commHash、rank、comm 指针各解决什么问题？入队后是谁执行？服务地址表、peerInfo、硬件图、算法图各自提供什么？为什么路径需要计算两次？每个阶段的产物由下一层的哪个函数消费？
+复习时可先不看源码，尝试回答：unique ID、commHash、rank、comm 指针各解决什么问题？服务地址表、peerInfo、硬件图、算法图、`topoRanks` 和 `rings` 各自提供什么？为什么 `ncclTopoCompute` 之后还需要 AllGather 和 Postset？`setupChannel`、`ncclTransportP2pSetup` 与 `devCommSetup` 分别完成哪一层交接？
+
+进阶阅读建议按问题选择：
+
+- 想理解图搜索本身：继续读 `search.cc` 的候选排序、带宽记账、回溯、`sameChannels` 和 `crossNic`。
+- 想改传输路径：沿 `selectTransport → setup → bootstrap 描述交换 → connect → proxy progress` 阅读 P2P、SHM 和 NET。
+- 想理解首轮 collective：从 `ncclPrepareTasks`、`algoNeedConnect` 到 `ncclCollPreconnect` 和 `doLaunches`。
+- 想研究派生 communicator：回到 Split/Shrink/Grow 的 parent、成员映射和共享资源路径。
+- 想研究新硬件接口：继续看 NVLS、CollNet、MNNVL、Device API、GIN 和 Host RMA 专题附录。
+
+这些深入方向不再改变普通主线的阶段边界。
