@@ -1,5 +1,7 @@
 # 03｜Device execution：让一份 work 在 GPU 上前进
 
+> 阅读定位：进阶原文。先读 [03 Device 执行主线](../03-device-execution.md)，再按协议或 CTA 执行问题查阅，不建议初学者从第一行顺序读完。
+
 [上一章](../02-host-execution.md) 已把请求变成 CUDA launch 参数和 GPU 可见的工作描述。
 现在沿同一份 `ncclDevWorkColl`，追到一片数据的发送与接收。
 源码基线为 NCCL **2.32.3**，`12df1a11`。

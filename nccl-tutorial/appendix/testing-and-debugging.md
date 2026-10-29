@@ -1,5 +1,7 @@
 # 11 验证与调试：沿执行阶段缩小问题
 
+> 阅读定位：进阶操作手册。先读 [11 验证与调试主线](../11-testing-and-debugging.md)，再按实际复现场景选择脚本和回归矩阵，不适合只作理论通读。
+
 [上一章](../10-development-workflow.md)增加了 task 选择日志。
 本章验证三件事：加载了改动后的库，记录了正确状态，原来的通信仍然算对并完成。
 主场景仍是两机各四 GPU、八 rank，每 rank 64 MiB FP32 Sum AllReduce，按 Ring/Simple 追踪。

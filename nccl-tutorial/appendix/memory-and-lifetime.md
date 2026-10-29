@@ -1,5 +1,7 @@
 # 09 内存与生命周期：谁持有对象，何时交还资源
 
+> 阅读定位：进阶原文。先读 [09 内存与生命周期主线](../09-memory-and-lifetime.md)，再按注册、FIFO、Graph 或 Finalize/Destroy 的具体对象查回收条件。
+
 [上一章：Proxy 与网络](../08-proxy-and-network.md) · [教程主页](../README.md)
 
 两台机器各 4 GPU，8 rank 各一进程，每 rank 做 64 MiB FP32 Sum AllReduce。

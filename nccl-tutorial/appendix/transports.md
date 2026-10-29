@@ -1,5 +1,7 @@
 # 07｜Transports：把邻接变成可用连接
 
+> 阅读定位：进阶原文。先读 [07 Transport 主线](../07-transports.md)，再按 P2P、SHM 或 NET 的具体建连问题查阅。
+
 **Transport（传输实现）**负责把“给哪个 peer 收发数据”变成可访问的缓冲、映射和通信端点。
 算法确定通信关系，transport 为每条边准备实现；同一次 AllReduce 的不同边可以采用不同传输方式。
 连接准备好后，GPU kernel 才能使用其中的地址和协议状态。

@@ -1,5 +1,7 @@
 # 08 Proxy 与网络：把 GPU 的一片数据送过网卡
 
+> 阅读定位：进阶原文。先读 [08 Proxy 与网络主线](../08-proxy-and-network.md)，再按 proxy op、request 或可见性问题查阅，适合定位“网络完成但 GPU 仍等待”。
+
 [上一章：算法](../04-algorithms.md) · [教程主页](../README.md)
 
 沿用两台机器、每台 4 GPU、8 rank 各一进程的案例：

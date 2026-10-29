@@ -82,7 +82,7 @@ GPU 构建与运行方法见 [环境准备](appendix/environment.md) 和 [示例
 
 ## 5. 进阶参考与专题附录
 
-主线看懂以后，再按问题选择，不必全部顺序阅读：
+主线看懂以后，先查 [附录阅读指南](appendix/README.md)，再按问题选择，不必全部顺序阅读：
 
 - **Host 与算法实现：**[Host 执行进阶](appendix/host-execution.md)、[Device 执行进阶](appendix/device-execution.md)、[集合算法进阶](appendix/algorithms.md)。
 - **初始化与拓扑：**[Communicator 进阶](appendix/communicator.md)、[Topology 进阶](appendix/topology.md)、[ncclCommInitRank 完整初始化精读](appendix/nccl-comm-init-rank.md)。
