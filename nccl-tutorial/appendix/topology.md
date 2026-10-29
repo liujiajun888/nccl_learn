@@ -1,4 +1,4 @@
-# 04｜Topology：从硬件路径到 channel 邻接
+# 06｜Topology：从硬件路径到 channel 邻接
 
 拓扑层把“这些 rank 使用哪些 GPU”转化为“每条通信通道怎样经过 GPU 和网卡”。
 它先建立硬件模型，再计算端点间路径，随后搜索算法布局，最后生成各 rank 的邻接关系。
@@ -139,16 +139,16 @@ r0 → r2 → r3 → r1 ── NIC0 ──→ r5 → r7 → r6 → r4
 初始化得到 Ring 图，只说明这套布局已经准备好供后续使用。
 
 修改 GPU/NIC 路径模型，主要影响初始化布局及其成本信息；修改消息大小相关的选择策略，则要继续追到任务调优。
-这种分工也是后续定位代码改动点的依据，详见 [06｜Host execution](06-host-execution.md) 和 [08｜算法](08-algorithms.md)。
+这种分工也是后续定位代码改动点的依据，详见 [02｜Host execution](../02-host-execution.md) 和 [04｜算法](../04-algorithms.md)。
 
 ## 6. 源码入口与无 GPU 阅读任务
 
-- [`src/graph/topo.cc:1989` · `ncclTopoGetSystem`](../nccl/src/graph/topo.cc#L1989)：从 XML、设备与插件信息生成系统模型；对象布局在 [`graph/topo.h:172`](../nccl/src/graph/topo.h#L172)。
-- [`src/graph/paths.cc:754` · `ncclTopoComputePaths`](../nccl/src/graph/paths.cc#L754)：建立并修正端点路径；[`ncclTopoSetPaths:52`](../nccl/src/graph/paths.cc#L52) 中可核对比较次序。
-- [`src/graph/search.cc:1151` · `ncclTopoCompute`](../nccl/src/graph/search.cc#L1151)：搜索算法布局；输入输出字段见 [`include/graph.h:174` · `ncclTopoGraph`](../nccl/src/include/graph.h#L174)。
-- [`src/graph/connect.cc:20` · `ncclTopoPreset`](../nccl/src/graph/connect.cc#L20) 与 [`380` · `ncclTopoPostset`](../nccl/src/graph/connect.cc#L380)：从本地顺序提取摘要，再写入跨节点邻接。
-- [`src/transport/generic.cc:14` · `ncclTransportRingConnect`](../nccl/src/transport/generic.cc#L14)：消费 channel 邻居，生成资源连接需求。
-- [`src/enqueue/enqueue.cc:2159` · `ncclGetAlgoInfo`](../nccl/src/enqueue/enqueue.cc#L2159)：在任务阶段输入消息特征，接收调优结果。
+- [`src/graph/topo.cc:1989` · `ncclTopoGetSystem`](../../nccl/src/graph/topo.cc#L1989)：从 XML、设备与插件信息生成系统模型；对象布局在 [`graph/topo.h:172`](../../nccl/src/graph/topo.h#L172)。
+- [`src/graph/paths.cc:754` · `ncclTopoComputePaths`](../../nccl/src/graph/paths.cc#L754)：建立并修正端点路径；[`ncclTopoSetPaths:52`](../../nccl/src/graph/paths.cc#L52) 中可核对比较次序。
+- [`src/graph/search.cc:1151` · `ncclTopoCompute`](../../nccl/src/graph/search.cc#L1151)：搜索算法布局；输入输出字段见 [`include/graph.h:174` · `ncclTopoGraph`](../../nccl/src/include/graph.h#L174)。
+- [`src/graph/connect.cc:20` · `ncclTopoPreset`](../../nccl/src/graph/connect.cc#L20) 与 [`380` · `ncclTopoPostset`](../../nccl/src/graph/connect.cc#L380)：从本地顺序提取摘要，再写入跨节点邻接。
+- [`src/transport/generic.cc:14` · `ncclTransportRingConnect`](../../nccl/src/transport/generic.cc#L14)：消费 channel 邻居，生成资源连接需求。
+- [`src/enqueue/enqueue.cc:2159` · `ncclGetAlgoInfo`](../../nccl/src/enqueue/enqueue.cc#L2159)：在任务阶段输入消息特征，接收调优结果。
 
 **阅读任务：沿第 4 节的示意 Ring，追踪 r1 的 `next=5`。**
 
@@ -160,4 +160,4 @@ r0 → r2 → r3 → r1 ── NIC0 ──→ r5 → r7 → r6 → r4
 `generic.cc:26` 读取该值登记发送需求。
 `ncclTopoGraph` 保存顺序、端点和成本；本次 `nBytes` 则在 `enqueue.cc:2163、2180` 进入任务调优。
 
-下一章：[05｜Transports：把邻接变成可用连接](05-transports.md)。
+下一章：[07｜Transports：把邻接变成可用连接](../07-transports.md)。

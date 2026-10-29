@@ -1,4 +1,4 @@
-# 01 软件栈全景：谁把一次 AllReduce 做完
+# 附录：软件栈全景——谁把一次 AllReduce 做完
 
 NCCL 的核心工作，是把一次多 GPU 通信请求，转成各 GPU 可以协同执行的数据流。应用描述“需要什么结果”；NCCL 决定怎样分块、经过哪些连接、由哪些执行者推进。
 
@@ -124,19 +124,19 @@ Host 任务：这次要通信多少数据，使用什么操作
 
 | 目录或文件 | 主要职责 | 对应阅读 |
 |---|---|---|
-| `src/nccl.h.in`、`src/collectives.cc` | 公开 API、参数与 collective 入口 | 02、集合接口附录 |
-| `src/init.cc`、`src/bootstrap.cc` | communicator 创建、成员会合、初始化和收尾 | 03、初始化精读 |
-| `src/graph/` | XML/硬件拓扑、路径、图搜索、Ring/Tree 拼接 | 04 |
-| `src/transport.cc`、`src/transport/` | transport 选择、连接协调、P2P/SHM/NET 及专用传输 | 05、09 |
-| `src/group.cc`、`src/enqueue/` | Group 调度、task、plan、work 上传、launch 和回收 | 06、10、11 |
-| `src/device/`、`src/include/device.h` | GPU 算法、协议原语、device 工作描述和函数分派 | 07、08 |
-| `src/proxy.cc` | proxy service、op pool、网络工作推进 | 09 |
-| `src/plugin/`、`src/include/plugin/` | NET、Tuner、Profiler、GIN、RMA 等插件契约与加载 | 05、09、现代特性附录 |
-| `src/tuning/` | 算法/协议候选筛选、成本模型和资源阈值 | 04、06、08、性能附录 |
-| `src/allocator.cc`、`src/register/`、`src/mem_manager.cc` | 分配、用户注册、映射和内部内存管理 | 10、现代特性附录 |
+| `src/nccl.h.in`、`src/collectives.cc` | 公开 API、参数与 collective 入口 | 01、集合接口附录 |
+| `src/init.cc`、`src/bootstrap.cc` | communicator 创建、成员会合、初始化和收尾 | 05、初始化精读 |
+| `src/graph/` | XML/硬件拓扑、路径、图搜索、Ring/Tree 拼接 | 06 |
+| `src/transport.cc`、`src/transport/` | transport 选择、连接协调、P2P/SHM/NET 及专用传输 | 07、08 |
+| `src/group.cc`、`src/enqueue/` | Group 调度、task、plan、work 上传、launch 和回收 | 02、09、10 |
+| `src/device/`、`src/include/device.h` | GPU 算法、协议原语、device 工作描述和函数分派 | 03、04 |
+| `src/proxy.cc` | proxy service、op pool、网络工作推进 | 08 |
+| `src/plugin/`、`src/include/plugin/` | NET、Tuner、Profiler、GIN、RMA 等插件契约与加载 | 07、08、现代特性附录 |
+| `src/tuning/` | 算法/协议候选筛选、成本模型和资源阈值 | 06、02、04、性能附录 |
+| `src/allocator.cc`、`src/register/`、`src/mem_manager.cc` | 分配、用户注册、映射和内部内存管理 | 09、现代特性附录 |
 | `src/dev_runtime*.cc`、`src/devcomm/`、`src/gin/`、`src/rma/`、`src/ce_coll.cc` | Device API、对称窗口、设备发起网络、RMA 和 copy-engine 路径 | 现代特性附录 |
 | `src/os/`、`src/misc/`、`src/include/` | OS 抽象、公共内部数据结构、同步与工具函数 | 各章按需查阅 |
-| `src/device/generate.py`、`src/device/Makefile`、`makefiles/` | 设备组合生成、device link 和主库构建 | 00、11 |
+| `src/device/generate.py`、`src/device/Makefile`、`makefiles/` | 设备组合生成、device link 和主库构建 | 环境附录、10 |
 
 `src/include/` 主要放 NCCL 内部契约，不能整体当作应用公开 API；应用公开声明主要来自 `src/nccl.h.in` 和 `src/include/nccl_device/` 等公开头文件。设备生成源码位于构建目录，不应把生成物当成唯一的手写实现来修改。
 
@@ -153,10 +153,10 @@ API/collectives
 
 ### 源码起点
 
-- [nccl/src/collectives.cc:192](../nccl/src/collectives.cc#L192)：`ncclAllReduceConfigImpl` 把 API 参数放入 `ncclInfo`。
-- [nccl/src/include/comm.h:212](../nccl/src/include/comm.h#L212)：`ncclTaskColl`，主机任务表示。
-- [nccl/src/include/comm.h:357](../nccl/src/include/comm.h#L357)：`ncclKernelPlan`，一次发射的材料。
-- [nccl/src/device/all_reduce.h:14](../nccl/src/device/all_reduce.h#L14)：`runRing`，GPU 侧把收发与规约连成算法。
+- [nccl/src/collectives.cc:192](../../nccl/src/collectives.cc#L192)：`ncclAllReduceConfigImpl` 把 API 参数放入 `ncclInfo`。
+- [nccl/src/include/comm.h:212](../../nccl/src/include/comm.h#L212)：`ncclTaskColl`，主机任务表示。
+- [nccl/src/include/comm.h:357](../../nccl/src/include/comm.h#L357)：`ncclKernelPlan`，一次发射的材料。
+- [nccl/src/device/all_reduce.h:14](../../nccl/src/device/all_reduce.h#L14)：`runRing`，GPU 侧把收发与规约连成算法。
 
 ### 阅读任务：把参数和数据分开
 
@@ -164,4 +164,4 @@ API/collectives
 
 核对点：前者保存指针和参数；后者按工作描述计算数据偏移并调用传输原语。两处之间缺少的任务构造、连接和 launch，正是后面要补齐的软件栈。
 
-下一章：[02 API 与执行约定](02-api-and-execution.md)。
+下一章：[01 API 与执行约定](../01-api-and-execution.md)。

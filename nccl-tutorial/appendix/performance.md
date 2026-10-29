@@ -4,7 +4,7 @@
 主场景为两机各四 GPU、八 rank，每 rank 64 MiB FP32 Sum AllReduce；节点与 rank 布局是教学假设。
 本文使用 NCCL `12df1a11`（2.32.3）和 nccl-tests `b4d5bee`（2.20.0）。
 本机 macOS 无 CUDA，数值算例为教学构造，GPU 和 profiler 命令均为待读者实验。
-计时和带宽列的精确定义见[tests 附录](appendix-nccl-tests.md)。
+计时和带宽列的精确定义见[tests 附录](nccl-tests.md)。
 
 ## 1. 小包看固定成本，大包看有效吞吐
 
@@ -52,7 +52,7 @@ NCCL 自身 tuning 也使用延迟项加数据量/带宽项，但还叠加拓扑
 先比较相同 size、相同缓冲模式的 time，再解释 algbw/busbw。
 独立重跑数次，保留中位数与波动；扫描范围不同的 `Avg bus bandwidth` 不适合直接排名。
 观察构建的 INFO 日志和 profiler 都可能改变时序，性能基线使用相同的低日志级别。
-第 11 章的 task 日志能证明选择；最终 channel 分配还需后续 work 或 profiler 信息。
+第 10 章的 task 日志能证明选择；最终 channel 分配还需后续 work 或 profiler 信息。
 
 ### 固定尺寸与扫描：同一 8 MiB 行也可能不同
 
@@ -136,9 +136,9 @@ bucket 是把若干梯度合成一次通信的缓冲；关键路径是决定本�
 
 | 路径:行 | 符号与解释范围 |
 | --- | --- |
-| [nccl/src/tuning/tuning_general.cc:52](../nccl/src/tuning/tuning_general.cc#L52) | `ncclTuningGetTime`：延迟项加数据/带宽项 |
-| [nccl-tests/src/common.cu:554](../nccl-tests/src/common.cu#L554) | `startColl`：totalnbytes、steps、shift 与指针轮换 |
-| [nccl-tests/src/common.cu:720](../nccl-tests/src/common.cu#L720) | `BenchTime`：profile 阶段与主表计时边界 |
-| [nccl-tests/src/all_reduce.cu:59](../nccl-tests/src/all_reduce.cu#L59) | `AllReduceGetBw`：algbw 与固定 busbw 系数 |
+| [nccl/src/tuning/tuning_general.cc:52](../../nccl/src/tuning/tuning_general.cc#L52) | `ncclTuningGetTime`：延迟项加数据/带宽项 |
+| [nccl-tests/src/common.cu:554](../../nccl-tests/src/common.cu#L554) | `startColl`：totalnbytes、steps、shift 与指针轮换 |
+| [nccl-tests/src/common.cu:720](../../nccl-tests/src/common.cu#L720) | `BenchTime`：profile 阶段与主表计时边界 |
+| [nccl-tests/src/all_reduce.cu:59](../../nccl-tests/src/all_reduce.cu#L59) | `AllReduceGetBw`：algbw 与固定 busbw 系数 |
 
-选择机制回查[08 算法](08-algorithms.md)，网络推进回查[09 proxy 与网络](09-proxy-and-network.md)，状态停滞回查[12 验证与调试](12-testing-and-debugging.md)。
+选择机制回查[04 算法](../04-algorithms.md)，网络推进回查[08 proxy 与网络](../08-proxy-and-network.md)，状态停滞回查[11 验证与调试](../11-testing-and-debugging.md)。

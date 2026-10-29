@@ -1,4 +1,4 @@
-# 02 API 与执行约定：应用怎样把工作交给 NCCL
+# 01 API 与执行约定：应用怎样把工作交给 NCCL
 
 一次 NCCL 调用同时描述两件事：参与者共同计算什么结果，以及本 rank 的 GPU 在什么依赖之后执行。前者由 collective 参数决定，后者接入 CUDA stream。
 
@@ -53,9 +53,9 @@ AllReduce 与 ReduceScatter 都做规约，区别是结果完整复制还是按 
 | AllGather | `C → P*C` |
 | ReduceScatter | `P*C → C` |
 
-可等分的数据先做 ReduceScatter，再做 AllGather，可以得到 AllReduce 的数学结果。第 08 章会说明 Ring 怎样把这两个阶段组织在同一个设备工作体中。
+可等分的数据先做 ReduceScatter，再做 AllGather，可以得到 AllReduce 的数学结果。第 04 章会说明 Ring 怎样把这两个阶段组织在同一个设备工作体中。
 
-其他集合接口与原地布局放在[接口附录](appendix-collectives.md)，读具体 API 时查即可。
+其他集合接口与原地布局放在[接口附录](appendix/collectives.md)，读具体 API 时查即可。
 
 ## 3. 本地 stream 顺序与跨 rank 顺序
 
@@ -108,7 +108,7 @@ NCCL_CHECK(ncclGroupEnd());
 
 Group 也用于需要共同推进的 Send/Recv。它是主机侧组织边界；GPU 上最后何时完成，继续由 stream/event 表达。
 
-第 06 章会看到，一个 group 可以形成多个 kernel plan；是否合并取决于任务兼容性与计划容量。
+第 02 章会看到，一个 group 可以形成多个 kernel plan；是否合并取决于任务兼容性与计划容量。
 
 ## 5. 提交状态与数据完成各看一个接口
 
@@ -125,7 +125,7 @@ Group 也用于需要共同推进的 Send/Recv。它是主机侧组织边界；G
 
 配置 `blocking=0` 时，部分 NCCL 主机工作会以 `ncclInProgress` 返回。应用先查询相关 communicator 的主机状态均为 `ncclSuccess`，再记录完成 event、提交依赖通信结果的 CUDA 工作或继续使用 comm。这时提交顺序已经建立，数据消费继续遵循 CUDA 依赖。
 
-用户输入在通信完成前保持可读，输出在通信完成后交给消费者；输出的下一次复用还需排在消费者之后。内部内存和 communicator 的回收在第 10 章统一展开。
+用户输入在通信完成前保持可读，输出在通信完成后交给消费者；输出的下一次复用还需排在消费者之后。内部内存和 communicator 的回收在第 09 章统一展开。
 
 ## 6. 从公开约定进入实现
 
@@ -141,6 +141,6 @@ Group 也用于需要共同推进的 Send/Recv。它是主机侧组织边界；G
 
 核对结果应是：**各 rank 的请求已提交；本地 GPU 通信工作完成；CPU 已获得可校验的结果。** 再看输入 vector 的作用域，确认它覆盖了 H2D 使用期。
 
-有 GPU 时运行两卡示例，检查全部元素的 `wrong=0`。想看提交与执行时间的分离，用第 12 章的 CUDA timeline 观察，保留现有依赖关系。
+有 GPU 时运行两卡示例，检查全部元素的 `wrong=0`。想看提交与执行时间的分离，用第 11 章的 CUDA timeline 观察，保留现有依赖关系。
 
-下一章：[03 Communicator](03-communicator.md)。
+下一章：[05 Communicator](05-communicator.md)。

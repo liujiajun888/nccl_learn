@@ -66,13 +66,13 @@ ReduceScatter 方向相反：完整输入在 `send`，rank 1 的输出写入 `se
 
 规约顺序影响浮点舍入。例如 FP32 中，先计算 `1e20 + (-1e20)` 再加 `3.14`，与先计算 `(-1e20) + 3.14` 再加 `1e20`，可能得到不同结果。一般浮点测试采用合适的绝对/相对误差，并验证所有输出元素。
 
-`ncclRedOpCreatePreMulSum` 提供“先乘标量再求和”的规约形式，其接口按标量、类型和驻留位置描述操作。扩展入口见[现代特性附录](appendix-modern-features.md)。
+`ncclRedOpCreatePreMulSum` 提供“先乘标量再求和”的规约形式，其接口按标量、类型和驻留位置描述操作。扩展入口见[现代特性附录](modern-features.md)。
 
 ## 4. Send/Recv：匹配一对参与者
 
 发送端指向接收 rank，接收端指定发送 rank，两端类型、count 和对应消息次序一致。API 通过 peer 与调用顺序配对消息。
 
-下面是循环交换的调用示意：每 rank 使用独立 send/recv buffer，容量均为 count，输入已就绪，comm/stream 已初始化；错误检查宏来自[完整示例](examples/single_process_allreduce.cu)。
+下面是循环交换的调用示意：每 rank 使用独立 send/recv buffer，容量均为 count，输入已就绪，comm/stream 已初始化；错误检查宏来自[完整示例](../examples/single_process_allreduce.cu)。
 
 ```cpp
 NCCL_CHECK(ncclGroupStart());
@@ -83,14 +83,14 @@ NCCL_CHECK(ncclRecv(recv, count, ncclFloat, (rank + nranks - 1) % nranks,
 NCCL_CHECK(ncclGroupEnd());
 ```
 
-Group 把需要共同推进的收发交给 NCCL 一起组织。结果消费继续遵循[第 02 章](02-api-and-execution.md)的 stream 完成顺序。
+Group 把需要共同推进的收发交给 NCCL 一起组织。结果消费继续遵循[第 01 章](../01-api-and-execution.md)的 stream 完成顺序。
 
 ## 源码入口
 
-- [nccl/src/nccl.h.in:550](../nccl/src/nccl.h.in#L550)：Reduce、Broadcast、AllReduce。
-- [nccl/src/nccl.h.in:607](../nccl/src/nccl.h.in#L607)：ReduceScatter、AllGather 的容量与偏移。
-- [nccl/src/nccl.h.in:640](../nccl/src/nccl.h.in#L640)：AlltoAll、Gather、Scatter。
-- [nccl/src/nccl.h.in:727](../nccl/src/nccl.h.in#L727)：Send/Recv 匹配。
-- [nccl-tests/src/alltoall.cu:43](../nccl-tests/src/alltoall.cu#L43)：测试中的 in-place 限制。
+- [nccl/src/nccl.h.in:550](../../nccl/src/nccl.h.in#L550)：Reduce、Broadcast、AllReduce。
+- [nccl/src/nccl.h.in:607](../../nccl/src/nccl.h.in#L607)：ReduceScatter、AllGather 的容量与偏移。
+- [nccl/src/nccl.h.in:640](../../nccl/src/nccl.h.in#L640)：AlltoAll、Gather、Scatter。
+- [nccl/src/nccl.h.in:727](../../nccl/src/nccl.h.in#L727)：Send/Recv 匹配。
+- [nccl-tests/src/alltoall.cu:43](../../nccl-tests/src/alltoall.cu#L43)：测试中的 in-place 限制。
 
-回到[教程首页](README.md)。
+回到[教程首页](../README.md)。

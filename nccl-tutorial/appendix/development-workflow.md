@@ -1,8 +1,8 @@
-# 11 开发工作流：从一个需求走到可验证的改动
+# 10 开发工作流：从一个需求走到可验证的改动
 
-前十章已经把 API、连接、提交、GPU 执行和回收串起来。
+前九章已经把 API、连接、提交、GPU 执行和回收串起来。
 现在把这条链反过来用：先写出要改变的行为，再找到负责它的对象和交接点。
-本章做一个小改动：记录普通 host AllReduce 的 task 选择结果；[第 12 章](12-testing-and-debugging.md)负责验证它。
+本章做一个小改动：记录普通 host AllReduce 的 task 选择结果；[第 11 章](../11-testing-and-debugging.md)负责验证它。
 
 源码基线为 NCCL `12df1a11`（2.32.3），测试为 nccl-tests `b4d5bee`（2.20.0）。
 贯穿场景是两机各四 GPU、八 rank，每 rank 64 MiB FP32 Sum AllReduce。
@@ -34,7 +34,7 @@ transport 是一对端点之间的连接和传输实现；net plugin 则提供�
 分支名说明工作位置，提交说明基点；本地补丁也是实验输入的一部分。
 版本号 2.32.3 只说明接口版本，同版本的两个 `.so` 可以包含不同代码。
 
-修改源码前，先按[测试附录](appendix-nccl-tests.md)构建未修改库与 tests，将基线保留在 `nccl/build`。
+修改源码前，先按[测试附录](nccl-tests.md)构建未修改库与 tests，将基线保留在 `nccl/build`。
 随后在自己的开发副本中添加下文插桩，使用 `nccl/build-observe` 存放观察版本的产物。
 插桩就是在程序某个状态点增加观测代码，本例只增加一条 host 日志。
 
@@ -82,7 +82,7 @@ channel 是逻辑并行通信通道；它与物理网线、NIC 或 SM 都不是�
 再问“这段函数由哪个线程执行”。group 的准备工作可能由异步 job 承担。
 NET proxy 是推进网络请求的主机线程，CUDA kernel 又是独立执行者。
 跨这些边界传递状态，要找队列、回调、计数或内存可见性规则，而不是假设函数返回代表全部完成。
-对象寿命的具体追踪方法见[第 10 章](10-memory-and-lifetime.md)。
+对象寿命的具体追踪方法见[第 09 章](../09-memory-and-lifetime.md)。
 
 ## 4. 本章任务：给选择完成的 task 加一条日志
 
@@ -143,7 +143,7 @@ env LD_LIBRARY_PATH="$ROOT/nccl/build-observe/lib:$CUDA_LIB${LD_LIBRARY_PATH:+:$
 
 观察两个 rank 的 `[tutorial-task]`：count 应为 16384，选择应为 Ring/Simple。
 预热、计时和校验都会调用通信，所以同一字段组合会重复出现。
-检查 oop/ip 两组 `#wrong=0`、错误摘要和正常退出，再由第 12 章比较基线与观察版本。
+检查 oop/ip 两组 `#wrong=0`、错误摘要和正常退出，再由第 11 章比较基线与观察版本。
 本章交付是一条日志、字段归属解释和一次合法用例记录；macOS 上可完成源码核对部分。
 两机八 rank 的 64 MiB 主场景留给回归，届时原始 task 的 count 应为 16777216。
 
@@ -180,12 +180,12 @@ nvcc 编译这些对象并执行 device link，manifest 再把它们交给主库
 
 | 路径:行 | 符号与用途 |
 | --- | --- |
-| [nccl/src/include/enqueue.h:69](../nccl/src/include/enqueue.h#L69) | `ncclGetAlgoInfo`：核对参数实际类型 |
-| [nccl/src/include/comm.h:212](../nccl/src/include/comm.h#L212) | `ncclTaskColl`；357 行 `ncclKernelPlan`：字段与持有关系 |
-| [nccl/src/enqueue/enqueue.cc:423](../nccl/src/enqueue/enqueue.cc#L423) | `ncclPrepareTasks`；644 行调度、1589 行回收、2159 行选择 |
-| [nccl/src/device/Makefile:80](../nccl/src/device/Makefile#L80) | `$(OBJDIR)/gensrc`；133 行 device link：生成到链接 |
-| [nccl/src/device/generate.py:186](../nccl/src/device/generate.py#L186) | `enumerate_func_rows`；447 行实例生成：组合到代码 |
-| [nccl/src/include/device.h:646](../nccl/src/include/device.h#L646) | `ncclDevFuncId`：host 分派索引与生成表对应 |
+| [nccl/src/include/enqueue.h:69](../../nccl/src/include/enqueue.h#L69) | `ncclGetAlgoInfo`：核对参数实际类型 |
+| [nccl/src/include/comm.h:212](../../nccl/src/include/comm.h#L212) | `ncclTaskColl`；357 行 `ncclKernelPlan`：字段与持有关系 |
+| [nccl/src/enqueue/enqueue.cc:423](../../nccl/src/enqueue/enqueue.cc#L423) | `ncclPrepareTasks`；644 行调度、1589 行回收、2159 行选择 |
+| [nccl/src/device/Makefile:80](../../nccl/src/device/Makefile#L80) | `$(OBJDIR)/gensrc`；133 行 device link：生成到链接 |
+| [nccl/src/device/generate.py:186](../../nccl/src/device/generate.py#L186) | `enumerate_func_rows`；447 行实例生成：组合到代码 |
+| [nccl/src/include/device.h:646](../../nccl/src/include/device.h#L646) | `ncclDevFuncId`：host 分派索引与生成表对应 |
 
-继续到[12 验证与调试](12-testing-and-debugging.md)，用证据区分“打印了选择”与“改动已通过回归”。
-[环境准备](00-environment.md)和[示例说明](examples/README.md)是并行参考；collective 语义查[操作附录](appendix-collectives.md)，新路径查[现代特性附录](appendix-modern-features.md)。
+继续到[11 验证与调试](../11-testing-and-debugging.md)，用证据区分“打印了选择”与“改动已通过回归”。
+[环境准备](environment.md)和[示例说明](../examples/README.md)是并行参考；collective 语义查[操作附录](collectives.md)，新路径查[现代特性附录](modern-features.md)。

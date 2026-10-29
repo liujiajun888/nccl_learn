@@ -1,4 +1,4 @@
-# 00 环境准备：构建并运行自己读的那份 NCCL
+# 附录：环境准备——构建并运行自己读的那份 NCCL
 
 源码实验的第一步是建立版本、构建产物和运行程序之间的对应关系。后续修改才能确定进入了实际执行路径。
 
@@ -16,7 +16,7 @@ nvcc --version
 
 前两项标识代码版本；`nvidia-smi` 查看驱动和设备；`topo -m` 提供 GPU、CPU、NIC 的距离信息；`nvcc` 来自用于构建的 Toolkit。
 
-`nvidia-smi` 显示的 CUDA 版本表示驱动支持能力，Toolkit 版本看 `nvcc`。基线提交见[首页](README.md)。
+`nvidia-smi` 显示的 CUDA 版本表示驱动支持能力，Toolkit 版本看 `nvcc`。基线提交见[首页](../README.md)。
 
 ## 2. 构建本地库与测试
 
@@ -42,7 +42,7 @@ make -C nccl-tutorial/examples \
 - `nccl-tests/build/`：集合通信测试程序。
 - `nccl-tutorial/examples/build/`：教程的单进程示例。
 
-构建 GPU kernel 可能较久。只面向一类 GPU 开发时，可以按 [nccl/README.md:30](../nccl/README.md#L30) 的 `NVCC_GENCODE` 配置缩小目标架构集合，取值与测试 GPU 的 compute capability 对应。
+构建 GPU kernel 可能较久。只面向一类 GPU 开发时，可以按 [nccl/README.md:30](../../nccl/README.md#L30) 的 `NVCC_GENCODE` 配置缩小目标架构集合，取值与测试 GPU 的 compute capability 对应。
 
 ## 3. 确认运行时加载的库
 
@@ -67,7 +67,7 @@ ldd nccl-tutorial/examples/build/single_process_allreduce
 
 第一条只做一次小规模通信，输入分别全为 1、2，两卡结果应全为 3，所有 `wrong=0`，最终 `PASS`。
 
-第二条固定每 rank 64 KiB，便于重复对照。检查 out-of-place、in-place 两组输出的错误数，再看耗时。参数与列含义见 [nccl-tests 附录](appendix-nccl-tests.md)。
+第二条固定每 rank 64 KiB，便于重复对照。检查 out-of-place、in-place 两组输出的错误数，再看耗时。参数与列含义见 [nccl-tests 附录](nccl-tests.md)。
 
 只有一张卡时，可把两条命令的设备数改为 1，验证构建、加载和本地执行；卡间路径留待多卡测试。
 
@@ -83,7 +83,7 @@ mpirun -np 2 ./nccl-tutorial/examples/build/mpi_allreduce
 
 这份示例采用独占整卡映射：进程只看到一张卡时选 device 0；看到同一完整设备列表时按 local rank 选卡。程序会检查同主机 PCI device 重复选择。
 
-多机启动沿用集群的 MPI/调度器配置，把相同程序、库路径和环境传到各节点。具体引导流程见[示例说明](examples/README.md)。
+多机启动沿用集群的 MPI/调度器配置，把相同程序、库路径和环境传到各节点。具体引导流程见[示例说明](../examples/README.md)。
 
 ## 6. 没有 GPU 时做什么
 
@@ -98,4 +98,4 @@ Python 程序验证 Ring 的块传递和求和结果；`make -n` 展示构建命
 
 本次教材整理环境为 macOS，未执行上面的 GPU/MPI 实验。
 
-回到[教程首页](README.md)，或从 [01 软件栈全景](01-software-stack.md) 开始阅读。
+回到[教程首页](../README.md)，或从 [00｜初学者主线](../00-mainline.md) 开始阅读。

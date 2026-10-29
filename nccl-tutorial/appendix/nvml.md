@@ -1,6 +1,6 @@
 # NVML：GPU 管理、状态观测与设备识别
 
-[返回教程主页](README.md) · [相关：MNNVL](appendix-mnnvl.md) · [相关：NVLS](appendix-nvls.md)
+[返回教程主页](../README.md) · [相关：MNNVL](mnnvl.md) · [相关：NVLS](nvls.md)
 
 **NVML 全称 NVIDIA Management Library，是 NVIDIA 提供的 GPU 管理与监控库。** 它回答“这张 GPU 是谁、运行状态怎样、与其他设备怎样连接”，CUDA 则负责计算任务和相应资源的创建、提交与执行。
 
@@ -137,11 +137,11 @@ GPU kernel、proxy 和网络设备执行通信
 
 | 阅读目标 | 入口 |
 |---|---|
-| Linux 动态加载 NVML | [src/os/linux.cc:628](../nccl/src/os/linux.cc#L628)，`ncclOsNvmlOpen` |
-| CUDA 到 NVML 的设备对应 | [src/init.cc:580](../nccl/src/init.cc#L580) |
-| GPU 与 NVLink 拓扑信息 | [src/graph/xml.cc:908](../nccl/src/graph/xml.cc#L908)，`ncclTopoGetXmlFromGpu` |
-| 获取 GPU fabric 信息 | [src/init.cc:931](../nccl/src/init.cc#L931) |
-| 消费 fabric 信息、检测 MNNVL | [src/mnnvl.cc:14](../nccl/src/mnnvl.cc#L14)，`ncclMnnvlCheck` |
+| Linux 动态加载 NVML | [src/os/linux.cc:628](../../nccl/src/os/linux.cc#L628)，`ncclOsNvmlOpen` |
+| CUDA 到 NVML 的设备对应 | [src/init.cc:580](../../nccl/src/init.cc#L580) |
+| GPU 与 NVLink 拓扑信息 | [src/graph/xml.cc:908](../../nccl/src/graph/xml.cc#L908)，`ncclTopoGetXmlFromGpu` |
+| 获取 GPU fabric 信息 | [src/init.cc:931](../../nccl/src/init.cc#L931) |
+| 消费 fabric 信息、检测 MNNVL | [src/mnnvl.cc:14](../../nccl/src/mnnvl.cc#L14)，`ncclMnnvlCheck` |
 
 官方参考：[NVML 概览](https://developer.nvidia.com/management-library-nvml)、[NVML 设备查询接口](https://docs.nvidia.com/deploy/nvml-api/api/group__nvmlDeviceQueries.html)、[MIG 设备标识](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/mig-device-names.html)。
 

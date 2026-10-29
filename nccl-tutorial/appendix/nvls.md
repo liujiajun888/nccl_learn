@@ -1,6 +1,6 @@
 # NVLS：利用 NVLink 的 multicast 与硬件归约
 
-[返回教程主页](README.md) · [相关：CollNet](appendix-collnet.md) · [相关：MNNVL](appendix-mnnvl.md)
+[返回教程主页](../README.md) · [相关：CollNet](collnet.md) · [相关：MNNVL](mnnvl.md)
 
 **NVLS 全称 NVLink SHARP，是 NCCL 利用 NVLink/NVSwitch 的 multicast 与归约能力加速集合通信的机制。** GPU 线程通过特殊的内存访问指令，把一部分原本需要逐个接收、累加、发送的工作交给互连硬件完成。
 
@@ -129,13 +129,13 @@ NCCL 还会根据 collective、数据类型、归约操作、拓扑和消息大�
 
 | 阅读目标 | 入口 |
 |---|---|
-| multicast 能力检测 | [src/transport/nvls.cc:166](../nccl/src/transport/nvls.cc#L166)，`ncclNvlsInit` |
-| 分配本地 UC 显存并绑定 MC 对象 | [src/transport/nvls.cc:224](../nccl/src/transport/nvls.cc#L224)，`nvlsAllocBindUc` |
-| UC/MC 输入输出连接 | [src/transport/nvls.cc:324](../nccl/src/transport/nvls.cc#L324) |
-| 单域与多域 NVLS AllReduce | [src/device/all_reduce.h:390](../nccl/src/device/all_reduce.h#L390) |
-| head、网络端点与树连接 | [src/graph/connect.cc:248](../nccl/src/graph/connect.cc#L248)，`connectNvls` |
-| Sum 的 multimem 归约读取 | [src/device/reduce_kernel.h:1126](../nccl/src/device/reduce_kernel.h#L1126) |
-| multimem 组播存储 | [src/device/op128.h:414](../nccl/src/device/op128.h#L414) |
-| MNNVL 与传统 NVLS 注册的边界 | [src/init.cc:1353](../nccl/src/init.cc#L1353) |
+| multicast 能力检测 | [src/transport/nvls.cc:166](../../nccl/src/transport/nvls.cc#L166)，`ncclNvlsInit` |
+| 分配本地 UC 显存并绑定 MC 对象 | [src/transport/nvls.cc:224](../../nccl/src/transport/nvls.cc#L224)，`nvlsAllocBindUc` |
+| UC/MC 输入输出连接 | [src/transport/nvls.cc:324](../../nccl/src/transport/nvls.cc#L324) |
+| 单域与多域 NVLS AllReduce | [src/device/all_reduce.h:390](../../nccl/src/device/all_reduce.h#L390) |
+| head、网络端点与树连接 | [src/graph/connect.cc:248](../../nccl/src/graph/connect.cc#L248)，`connectNvls` |
+| Sum 的 multimem 归约读取 | [src/device/reduce_kernel.h:1126](../../nccl/src/device/reduce_kernel.h#L1126) |
+| multimem 组播存储 | [src/device/op128.h:414](../../nccl/src/device/op128.h#L414) |
+| MNNVL 与传统 NVLS 注册的边界 | [src/init.cc:1353](../../nccl/src/init.cc#L1353) |
 
-继续阅读：[CollNet](appendix-collnet.md) 解释集合网络后端；[MNNVL](appendix-mnnvl.md) 解释跨物理节点的 fabric 和显存映射。
+继续阅读：[CollNet](collnet.md) 解释集合网络后端；[MNNVL](mnnvl.md) 解释跨物理节点的 fabric 和显存映射。

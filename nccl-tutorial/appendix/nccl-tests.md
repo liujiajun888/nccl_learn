@@ -9,8 +9,8 @@ nccl-tests 是 NCCL 的调用方：它分配 buffer、创建 communicator、提�
 ## 1. 构建调用方，确认加载的是目标库
 
 命令在 Linux GPU 节点的 Bash 中，从读者自己的 `nccl_learn` 根目录执行。
-先按[环境参考](00-environment.md)准备驱动、toolkit、编译器与 Python 3。
-下面生成未修改的基线库；第 11 章的观察版本使用另一构建目录。
+先按[环境参考](environment.md)准备驱动、toolkit、编译器与 Python 3。
+下面生成未修改的基线库；第 10 章的观察版本使用另一构建目录。
 
 ```bash
 ROOT="${ROOT:-$PWD}"
@@ -26,7 +26,7 @@ env LD_LIBRARY_PATH="$ROOT/nccl/build/lib:$CUDA_LIB${LD_LIBRARY_PATH:+:$LD_LIBRA
 
 `NCCL_HOME` 给编译器头文件和链接搜索路径，`LD_LIBRARY_PATH` 决定运行时库搜索。
 核对 `ldd` 中的 NCCL 路径；启动报告的 `nccl-headers` 和 `nccl-library` 在本版应为 23203。
-同一版本号仍可有不同补丁，构建/加载身份的完整核验见[第 11 章](11-development-workflow.md)。
+同一版本号仍可有不同补丁，构建/加载身份的完整核验见[第 10 章](../10-development-workflow.md)。
 
 ## 2. 一个固定 64 KiB 的合法用例
 
@@ -64,7 +64,7 @@ size count type redop root     time algbw busbw #wrong       time algbw busbw #w
 `size` 是有效发送/接收字节数中的较大者，`count` 是该操作的元素参数，`type` 决定元素大小。
 AllReduce 的 size=count×类型字节数；主场景为 67108864 B、16777216 个 float。
 `redop=sum` 表示求和；AllReduce 没有根，`root=-1` 是正常输出。
-其他 collective 的 count 含义要按操作查[操作附录](appendix-collectives.md)。
+其他 collective 的 count 含义要按操作查[操作附录](collectives.md)。
 
 oop 即 out-of-place，输入输出分离；ip 即 in-place，按 API 约定复用存储。
 AllReduce 的 ip 令输入输出同址，两组都是完整 communicator 的结果，并非分别代表两张卡。
@@ -97,7 +97,7 @@ tests 固定使用此系数，实际选 Tree 时也不会换公式；busbw 是�
 
 `-C` 可改变显示的时间口径，`-G` 引入 Graph 重放，`-I` 增加逐迭代 event 统计。
 采用这些模式时需重新核对测量区间，本附录命令保持默认模式。
-地址轮换也影响缓存工作集，固定尺寸与扫描的比较方法见[性能附录](appendix-performance.md)。
+地址轮换也影响缓存工作集，固定尺寸与扫描的比较方法见[性能附录](performance.md)。
 
 ## 5. MPI 进程数怎样变成八个 NCCL rank
 
@@ -140,11 +140,11 @@ env LD_LIBRARY_PATH="$ROOT/nccl/build/lib:$CUDA_LIB:$MPI_HOME/lib:$MPI_HOME/lib6
 
 | 路径:行 | 符号与用途 |
 | --- | --- |
-| [nccl-tests/src/Makefile:24](../nccl-tests/src/Makefile#L24) | `NCCL_HOME`、`MPI`：头文件与链接路径 |
-| [nccl-tests/src/common.cu:720](../nccl-tests/src/common.cu#L720) | `BenchTime`：预热、计时、校验边界 |
-| [nccl-tests/src/timer.cc:8](../nccl-tests/src/timer.cc#L8) | `now`、`timer::elapsed`：steady_clock |
-| [nccl-tests/src/common.cu:324](../nccl-tests/src/common.cu#L324) | `Allreduce`：先聚合耗时再计算带宽 |
-| [nccl-tests/src/all_reduce.cu:34](../nccl-tests/src/all_reduce.cu#L34) | `AllReduceGetCollByteCount`；59 行 `AllReduceGetBw` |
-| [nccl-tests/src/util.cu:719](../nccl-tests/src/util.cu#L719) | `writeDeviceReport`：版本、rank、可见设备映射 |
+| [nccl-tests/src/Makefile:24](../../nccl-tests/src/Makefile#L24) | `NCCL_HOME`、`MPI`：头文件与链接路径 |
+| [nccl-tests/src/common.cu:720](../../nccl-tests/src/common.cu#L720) | `BenchTime`：预热、计时、校验边界 |
+| [nccl-tests/src/timer.cc:8](../../nccl-tests/src/timer.cc#L8) | `now`、`timer::elapsed`：steady_clock |
+| [nccl-tests/src/common.cu:324](../../nccl-tests/src/common.cu#L324) | `Allreduce`：先聚合耗时再计算带宽 |
+| [nccl-tests/src/all_reduce.cu:34](../../nccl-tests/src/all_reduce.cu#L34) | `AllReduceGetCollByteCount`；59 行 `AllReduceGetBw` |
+| [nccl-tests/src/util.cu:719](../../nccl-tests/src/util.cu#L719) | `writeDeviceReport`：版本、rank、可见设备映射 |
 
-执行失败时回到[12 验证与调试](12-testing-and-debugging.md)，分析性能时转到[性能附录](appendix-performance.md)。
+执行失败时回到[11 验证与调试](../11-testing-and-debugging.md)，分析性能时转到[性能附录](performance.md)。

@@ -1,84 +1,101 @@
 # NCCL 软件栈：从一次 AllReduce 到代码开发
 
-这份教程面向有 CUDA/C++ 基础、希望理解或进入 NCCL 开发的读者；有驱动或系统编程经验（尤其是用户态驱动，UMD）会更容易衔接。目标是建立一张能用于读代码、改代码和定位问题的软件栈地图。
+这份教程面向有 CUDA/C++ 基础、希望理解或进入 NCCL 开发的读者。目标是先建立一张能用于读代码和定位问题的软件栈地图，再逐步深入具体实现。
 
-全书围绕三个问题展开：**每层负责什么，层与层交接什么，修改后怎样验证。** 用一次 AllReduce 串起初始化、连接、任务提交、GPU 执行、网络推进和资源回收。
+**第一次读 NCCL，请从 [00｜初学者主线](00-mainline.md) 开始，不要先按 01→12 逐行硬读。**先明白一次 AllReduce 怎样从 API 走到 GPU/NIC，再回头补初始化、拓扑、transport 和各种细节。
 
-## 先说结论：能建立全栈地图，但不能只停留在阅读
-
-如果“整个软件栈”指 **NCCL 一次普通 host collective 从 API 到 GPU/NIC 的完整链路**，本教程可以建立较完整的地图：既能说清每层职责，也能沿源码找到交接对象和验证入口。如果指所有 NCCL 算法、所有 API、所有硬件分支，以及 CUDA KMD、GPU 固件和 NIC 驱动内部实现，则不能把这份教程当作完整替代品。
-
-| 范围 | 教程覆盖的内容 | 读后应该能回答 |
-|---|---|---|
-| 普通 host collective 主线 | API、Group、communicator、bootstrap、拓扑、图搜索、transport、planner、device kernel、proxy、内存与回收（01–10、初始化精读） | 一次 AllReduce 的参数怎样变成 GPU 和网络上的工作？每层交接什么？ |
-| 算法与协议 | Ring/Tree、Simple/LL/LL128；NVLS、CollNet、PAT 等扩展入口（07–09、专题附录） | 数据为什么这样分块、规约、发布和复用？ |
-| 扩展软件栈 | CUDA Graph、对称窗口、Device API、GIN、Host RMA、MNNVL（现代特性附录） | 新特性改变了哪一层，增加什么能力和生命周期约束？ |
-| 开发与验证 | 构建、源码插桩、CPU 模拟、nccl-tests、性能和调试（00、11、12、示例与性能附录） | 改动落在哪层，怎样证明加载正确、结果正确、问题属于哪个阶段？ |
-| 教程边界 | NVIDIA KMD/固件/NIC 驱动内部、训练框架专属实现、每个 NCCL 特殊分支的逐行讲解 | 这些内容需要另查对应项目或继续沿本教程的源码入口深入 |
-
-**“看懂”最低限度应当包含一次动手闭环**：跑通 CPU Ring 模拟器，完成一个 GPU 正确性基线，做一次不改变行为的源码插桩，并按第 12 章的方法解释一条等待或异常。没有这些实践，只能说是获得了阅读地图，还不能算掌握了整个软件栈。
-
-## 按目标选择阅读路线
-
-- **只使用 NCCL：** `00 → 01 → 02 → 示例 → 集合接口附录 → nccl-tests 附录`，先掌握调用约定、参与者映射和完成判断。
-- **读懂普通 NCCL 实现：** 按 `01 → 12` 顺读，再用[初始化精读](appendix-nccl-comm-init-rank.md)补齐普通新建 communicator 的完整初始化主线。
-- **做 transport/device 开发：** 重点读 `04 → 05 → 07 → 09 → 10 → 11 → 12`，再按需求查 NVLS、CollNet、MNNVL 和现代特性附录。
-- **研究新硬件或新接口：** 先读 `01、03、04、05、10`，再读现代特性、NVLS、CollNet、MNNVL 和 NVML 附录，明确新能力接入的是拓扑、资源、执行还是观测层。
-
-## 按 01 → 12 顺读
+## 1. 初学者推荐路线
 
 ```text
-01 软件栈全景
-       ↓
-02 API 与执行约定
-       ↓
-03 Communicator → 04 拓扑 → 05 Transport       建立通信关系
-       ↓
-06 Host 执行 → 07 Device 执行 → 08 算法        把调用变成数据流
-       ↓
-09 Proxy 与网络 → 10 内存与生命周期            推进和回收
-       ↓
-11 开发工作流 → 12 测试与调试                  开始修改代码
+00 初学者主线：先建立整体流程
+  ↓
+01 API 与执行约定：应用交给 NCCL 什么
+  ↓
+02 Host 执行：请求怎样变成 task、work、plan 和 launch
+  ↓
+03 Device 执行：CTA 怎样读取 work 并执行算法
+  ↓
+04 集合算法：Ring/Tree 怎样得到 AllReduce
+  ↓
+05 Communicator → 06 拓扑 → 07 Transport：这些资源从哪来
+  ↓
+08 Proxy 与网络 → 09 内存与生命周期：跨机推进和回收
+  ↓
+10 开发工作流 → 11 测试与调试：开始做小改动
 ```
 
-| 章节 | 核心问题 |
+[软件栈全景](appendix/software-stack.md) 用作**目录和名词地图**，不必在第一遍逐节精读。
+
+每个阶段只记录四件事：**输入、动作、产物、下一消费者**。第一次阅读可先跳过递归搜索细节、调度公式、FIFO 容量、特殊硬件和异常分支。
+
+## 2. 读完主线应该能回答什么？
+
+如果“整个软件栈”指一次普通 host collective 从 API 到 GPU/NIC 的完整链路，读完主线后你应该能解释：
+
+| 问题 | 对应内容 |
 |---|---|
-| [01 软件栈全景](01-software-stack.md) | NCCL、CUDA、驱动、GPU 和 NIC 怎样分工？ |
-| [02 API 与执行约定](02-api-and-execution.md) | 应用交给 NCCL 的是什么工作，如何接入 CUDA 依赖？ |
-| [03 Communicator](03-communicator.md) | 分散的 GPU 怎样建立共同通信关系？ |
-| [04 拓扑与通信图](04-topology.md) | 硬件连接怎样变成 ring/tree 邻接？ |
-| [05 Transport](05-transports.md) | 两端怎样获得可用的缓冲、映射和连接？ |
-| [06 Host 执行](06-host-execution.md) | API 参数怎样变成 task、plan 和设备工作描述？ |
-| [07 Device 执行](07-device-execution.md) | GPU 怎样取工作、调用原语并推进协议？ |
-| [08 集合算法](08-algorithms.md) | Ring/Tree 怎样分工，如何收齐每份贡献？ |
-| [09 Proxy 与网络](09-proxy-and-network.md) | CPU、GPU 和 NIC 怎样共同完成跨机传输？ |
-| [10 内存与生命周期](10-memory-and-lifetime.md) | 地址、注册、工作描述和通信对象何时回收？ |
-| [11 开发工作流](11-development-workflow.md) | 一个需求应该改哪层，怎样做第一项源码实验？ |
-| [12 测试与调试](12-testing-and-debugging.md) | 怎样验证修改，并把问题定位到具体阶段？ |
+| 应用的一次调用包含哪些信息？ | buffer、count、datatype、op、comm、stream |
+| 初始化准备了哪些可复用资源？ | peerInfo、拓扑、算法图、channel 邻接、transport、devComm |
+| algorithm、protocol、transport、channel 有什么区别？ | 数据依赖、分片与进度、连接实现、并行工作分区 |
+| task、work、plan 分别给谁使用？ | host 调度、device 工作描述、一次 launch |
+| `channelMask` 怎样影响 CUDA grid？ | 置位数决定活动 CTA 数，置位顺序决定 block→channel 映射 |
+| launch 成功是否等于结果可读？ | 不是；还要看 stream/event，资源回收另有条件 |
 
-## 随手查阅
+这不等于覆盖所有 NCCL 算法、API、硬件分支，也不包含 NVIDIA KMD、GPU 固件或 NIC 驱动内部实现。**先能讲清一条主线，再按问题扩大范围。**
 
-- [00 环境准备](00-environment.md)：构建本地 NCCL、确认动态库、跑通两卡基线。
-- [示例代码](examples/README.md)：单进程多卡、MPI 多进程、CPU Ring 模拟器。
-- [集合接口与布局](appendix-collectives.md)：count、结果归属、原地关系和 Send/Recv。
-- [ncclCommInitRank 源码精读](appendix-nccl-comm-init-rank.md)：覆盖普通新建 communicator 从 API、Group 调度、bootstrap、拓扑与图搜索，到全局图拼接、transport 连接、`devCommSetup` 和收尾的完整主线；特殊分支与深层辅助函数另列进阶阅读。
-- [nccl-tests](appendix-nccl-tests.md)：参数、计时与输出列。
-- [性能分析](appendix-performance.md)：延迟/带宽模型、对照实验、计算通信重叠。
-- [现代特性](appendix-modern-features.md)：Graph、NVLS、Device API、GIN、RMA 等扩展入口。
-- [NVML：GPU 管理与观测](appendix-nvml.md)：设备标识、状态查询，以及 NCCL 如何获取拓扑与 fabric 信息。
-- [CollNet：集合网络通信](appendix-collnet.md)：网络插件的职责，以及 Direct、Chain 两种节点内数据流。
-- [MNNVL：跨节点 NVLink](appendix-mnnvl.md)：fabric 分组、远端显存映射与跨 host P2P。
-- [NVLS：NVLink 硬件归约](appendix-nvls.md)：multicast/multimem、AllReduce 数据流及与 MNNVL、CollNet 的分工。
+## 3. 章节按用途查阅
 
-每章保留少量关键源码入口，以及一项能核对结果的阅读或实验任务。先读懂正文中的交接关系，再去源码找对应对象；完整 API 清单与特殊路径留在附录。
+| 章节 | 什么时候读 |
+|---|---|
+| [00 初学者主线](00-mainline.md) | 第一次建立全栈流程，必须优先读 |
+| [01 API 与执行约定](01-api-and-execution.md) | 理解参数、Group、stream/event 和完成语义 |
+| [02 Host 执行](02-host-execution.md) | 用一条小案例读懂 API→task→调优→work/plan→launch |
+| [03 Device 执行](03-device-execution.md) | 理解 CTA、work、Primitives 和协议推进 |
+| [04 集合算法](04-algorithms.md) | 理解 ReduceScatter+AllGather、Ring 与 Tree |
+| [05 Communicator](05-communicator.md) | 理解成员会合、初始化阶段和按需连接 |
+| [06 拓扑与通信图](06-topology.md) | 理解硬件路径怎样变成 channel 邻接 |
+| [07 Transport](07-transports.md) | 理解 P2P/SHM/NET 的缓冲、映射和连接 |
+| [08 Proxy 与网络](08-proxy-and-network.md) | 理解 proxy op、网络 request、GPU 可见性与槽位回收 |
+| [09 内存与生命周期](09-memory-and-lifetime.md) | 理解用户 buffer、内部缓冲、描述和注册何时回收 |
+| [10 开发工作流](10-development-workflow.md) | 做一次不改变行为的源码插桩并建立开发闭环 |
+| [11 测试与调试](11-testing-and-debugging.md) | 按初始化、连接、提交、GPU、NET、完成阶段定位问题 |
+| [环境准备](appendix/environment.md) | 需要构建本地 NCCL、核对加载库和运行基线时 |
+| [软件栈全景](appendix/software-stack.md) | 回查分层职责和 `src/` 目录地图 |
 
-阅读时建议始终同时记录三项：**当前阶段的输入、产生的对象、下一个消费者**。这比单独背函数名更能帮助你在版本变化后重新定位代码。
+## 4. 用实践确认“看懂”
 
-## 贯穿案例与源码基线
+不要只以读完页数作为标准。无 GPU 时先完成前两项；有 GPU 时再完成第三项，并用第四项检验自己的分析方式。
 
-主线设定两台机器，每台四张 GPU，每进程管理一张卡，共八个 rank。每个 rank 对 **64 MiB FP32** 数组做 Sum AllReduce。小数组和四 rank 手算用于展示同一机制；这些布局和数值是教学设定。
+1. **CPU 算法闭环**：运行 Ring 模拟器，解释每份贡献为何恰好加入一次。
+2. **源码阅读闭环**：用 `grad` 这个指针串起 `ncclInfo → task → work → launch`，指出每一步有没有复制 payload。
+3. **GPU 正确性闭环**：运行两卡示例，确认输出、异步状态和 stream 完成，再做一次不改变行为的插桩。
+4. **调试闭环**：遇到等待时，能说出最后一个已完成阶段，以及下一阶段由谁推进。
 
-先理解普通 host collective，再用 Ring/Simple 这一具体分支追代码。实际算法和传输路径由任务、拓扑及运行配置共同选择。
+在项目根目录运行 CPU 模拟：
+
+```bash
+python3 nccl-tutorial/examples/ring_simulator.py --ranks 4 --chunk-size 2
+python3 nccl-tutorial/examples/ring_simulator.py --self-test
+```
+
+GPU 构建与运行方法见 [环境准备](appendix/environment.md) 和 [示例说明](examples/README.md)。
+
+## 5. 进阶参考与专题附录
+
+主线看懂以后，再按问题选择，不必全部顺序阅读：
+
+- **Host 与算法实现：**[Host 执行进阶](appendix/host-execution.md)、[Device 执行进阶](appendix/device-execution.md)、[集合算法进阶](appendix/algorithms.md)。
+- **初始化与拓扑：**[Communicator 进阶](appendix/communicator.md)、[Topology 进阶](appendix/topology.md)、[ncclCommInitRank 完整初始化精读](appendix/nccl-comm-init-rank.md)。
+- **传输、网络与生命周期：**[Transport 进阶](appendix/transports.md)、[Proxy 与网络进阶](appendix/proxy-and-network.md)、[内存与生命周期进阶](appendix/memory-and-lifetime.md)。
+- **开发与验证：**[开发工作流进阶](appendix/development-workflow.md)、[测试与调试进阶](appendix/testing-and-debugging.md)。
+- **接口、测试与性能：**[集合接口与布局](appendix/collectives.md)、[nccl-tests](appendix/nccl-tests.md)、[性能分析](appendix/performance.md)。
+- **扩展机制：**[现代特性](appendix/modern-features.md)、[NVLS](appendix/nvls.md)、[CollNet](appendix/collnet.md)、[MNNVL](appendix/mnnvl.md)、[NVML](appendix/nvml.md)。
+
+## 6. 贯穿案例与源码基线
+
+正文的大案例是两台机器、每台四张 GPU、八个 rank，每 rank 对 64 MiB FP32 做 Sum AllReduce。新手导读则先使用两个 rank、四个 float，避免在大数据和复杂拓扑中丢失主线。
+
+主线先理解普通 host collective，再用 Ring/Simple 追踪具体实现；实际算法和传输路径由任务、拓扑及运行配置共同选择。
 
 | 源码 | 版本 | 提交 |
 |---|---|---|
@@ -87,17 +104,6 @@
 
 源码链接指向项目里的 `nccl/` 和 `nccl-tests/`。行号对应上述提交；换版本时按符号重新定位。
 
-## 从哪里开始动手
-
-在包含三个目录的项目根目录运行 CPU 模拟：
-
-```bash
-python3 nccl-tutorial/examples/ring_simulator.py --ranks 4 --chunk-size 2
-python3 nccl-tutorial/examples/ring_simulator.py --self-test
-```
-
-有 Linux NVIDIA GPU 时，按 [00](00-environment.md) 构建，再运行单进程示例与 nccl-tests。源码阅读和 CPU 模拟可以先在本机完成。
-
 本教材在 macOS 上整理，GPU/CUDA/MPI 示例未在此环境编译或运行。GPU 输出均标为预期，性能算例均标为教学数据；CPU 模拟验证的是算法调度与结果。
 
-从 [01 软件栈全景](01-software-stack.md) 开始。
+**现在从 [00｜初学者主线](00-mainline.md) 开始。**
