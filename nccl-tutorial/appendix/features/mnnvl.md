@@ -1,6 +1,6 @@
 # MNNVL：把 NVLink 访问域扩展到多个物理节点
 
-[返回教程主页](../README.md) · [相关：NVML](nvml.md) · [相关：NVLS](nvls.md)
+[返回教程主页](../../README.md) · [相关：NVML](nvml.md) · [相关：NVLS](nvls.md)
 
 **MNNVL 全称 Multi-Node NVLink，支持不同物理节点上的 GPU 通过 NVLink fabric 通信，并访问已经授权、映射的远端 GPU 显存。** 它扩展的是 GPU 的互连与内存访问范围，集合算法仍由 NCCL 组织。
 
@@ -122,11 +122,11 @@ MNNVL 需要真实的跨节点 NVLink 硬件连接、配套驱动、就绪的 fa
 
 | 阅读目标 | 入口 |
 |---|---|
-| 能力检测与 clique 成员收集 | [src/mnnvl.cc:14](../../nccl/src/mnnvl.cc#L14)，`ncclMnnvlCheck` |
-| FABRIC 导入、导出检查 | [src/mnnvl.cc:57](../../nccl/src/mnnvl.cc#L57) |
-| 按 clique 融合拓扑 | [src/graph/topo.cc:2118](../../nccl/src/graph/topo.cc#L2118) |
-| 跨 host P2P 与 fabric 匹配 | [src/graph/paths.cc:335](../../nccl/src/graph/paths.cc#L335)、[464](../../nccl/src/graph/paths.cc#L464) |
-| 导入对端显存并设置访问权限 | [src/transport/p2p.cc:267](../../nccl/src/transport/p2p.cc#L267)，`ncclP2pImportShareableBuffer` |
-| 默认启用策略 | [src/init.cc:1054](../../nccl/src/init.cc#L1054) |
+| 能力检测与 clique 成员收集 | [src/mnnvl.cc:14](../../../nccl/src/mnnvl.cc#L14)，`ncclMnnvlCheck` |
+| FABRIC 导入、导出检查 | [src/mnnvl.cc:57](../../../nccl/src/mnnvl.cc#L57) |
+| 按 clique 融合拓扑 | [src/graph/topo.cc:2118](../../../nccl/src/graph/topo.cc#L2118) |
+| 跨 host P2P 与 fabric 匹配 | [src/graph/paths.cc:335](../../../nccl/src/graph/paths.cc#L335)、[464](../../../nccl/src/graph/paths.cc#L464) |
+| 导入对端显存并设置访问权限 | [src/transport/p2p.cc:267](../../../nccl/src/transport/p2p.cc#L267)，`ncclP2pImportShareableBuffer` |
+| 默认启用策略 | [src/init.cc:1054](../../../nccl/src/init.cc#L1054) |
 
 继续阅读：[NVML](nvml.md) 解释设备与 fabric 信息从哪里来；[NVLS](nvls.md) 解释访问域内怎样利用硬件归约。

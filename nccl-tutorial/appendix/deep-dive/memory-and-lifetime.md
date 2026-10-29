@@ -1,8 +1,8 @@
 # 09 内存与生命周期：谁持有对象，何时交还资源
 
-> 阅读定位：进阶原文。先读 [09 内存与生命周期主线](../09-memory-and-lifetime.md)，再按注册、FIFO、Graph 或 Finalize/Destroy 的具体对象查回收条件。
+> 阅读定位：进阶原文。先读 [09 内存与生命周期主线](../../09-memory-and-lifetime.md)，再按注册、FIFO、Graph 或 Finalize/Destroy 的具体对象查回收条件。
 
-[上一章：Proxy 与网络](../08-proxy-and-network.md) · [教程主页](../README.md)
+[上一章：Proxy 与网络](../../08-proxy-and-network.md) · [教程主页](../../README.md)
 
 两台机器各 4 GPU，8 rank 各一进程，每 rank 做 64 MiB FP32 Sum AllReduce。
 继续追普通 host API 规划出的 Ring/Simple 路径。
@@ -191,20 +191,20 @@ comm 收尾会等待其 `localPersistentRefs` 归零；应用先结束重放、�
 
 以下位置按本地 NCCL `12df1a11` / `2.32.3` 核对：
 
-1. **分配与导入**：[src/allocator.cc:17](../../nccl/src/allocator.cc#L17) `ncclMemAlloc`；
-   [src/transport/p2p.cc:267](../../nccl/src/transport/p2p.cc#L267) `ncclP2pImportShareableBuffer`。
-2. **内部缓冲的 MR**：[src/transport/net.cc:1004](../../nccl/src/transport/net.cc#L1004) `sendProxyConnect` 注册循环；
-   [1216](../../nccl/src/transport/net.cc#L1216) `sendProxyFree` 先注销 MR，再释放缓冲和连接。
-3. **用户注册缓存**：[src/register/register.cc:26](../../nccl/src/register/register.cc#L26) `ncclRegister`；
-   [172](../../nccl/src/register/register.cc#L172) `commDeregister` 检查 local/graph refs。
-4. **plan 移交与清理**：[src/enqueue/enqueue.cc:1558](../../nccl/src/enqueue/enqueue.cc#L1558) `hostStreamPlanTask`、
-   [1589](../../nccl/src/enqueue/enqueue.cc#L1589) `reclaimPlan`、[1655](../../nccl/src/enqueue/enqueue.cc#L1655) `persistentDestructor`；
-   [src/proxy.cc:515–516](../../nccl/src/proxy.cc#L515) `ncclLocalOpAppend` 的复制与引用交接。
-5. **FIFO 完成边界**：[src/enqueue/enqueue.cc:2028](../../nccl/src/enqueue/enqueue.cc#L2028) `KernelFinishCallback_fn`、
-   [2037](../../nccl/src/enqueue/enqueue.cc#L2037) `ncclLaunchFinish`；
-   [src/include/comm.h:916–935](../../nccl/src/include/comm.h#L916) `ncclCommPollEventCallbacks` 确认事件后执行回调。
-6. **收尾协调**：[src/init.cc:3122](../../nccl/src/init.cc#L3122) `commDestroySync`；
-   [3255–3307](../../nccl/src/init.cc#L3255) `commReclaim` 的最后到达者与并发收尾。
+1. **分配与导入**：[src/allocator.cc:17](../../../nccl/src/allocator.cc#L17) `ncclMemAlloc`；
+   [src/transport/p2p.cc:267](../../../nccl/src/transport/p2p.cc#L267) `ncclP2pImportShareableBuffer`。
+2. **内部缓冲的 MR**：[src/transport/net.cc:1004](../../../nccl/src/transport/net.cc#L1004) `sendProxyConnect` 注册循环；
+   [1216](../../../nccl/src/transport/net.cc#L1216) `sendProxyFree` 先注销 MR，再释放缓冲和连接。
+3. **用户注册缓存**：[src/register/register.cc:26](../../../nccl/src/register/register.cc#L26) `ncclRegister`；
+   [172](../../../nccl/src/register/register.cc#L172) `commDeregister` 检查 local/graph refs。
+4. **plan 移交与清理**：[src/enqueue/enqueue.cc:1558](../../../nccl/src/enqueue/enqueue.cc#L1558) `hostStreamPlanTask`、
+   [1589](../../../nccl/src/enqueue/enqueue.cc#L1589) `reclaimPlan`、[1655](../../../nccl/src/enqueue/enqueue.cc#L1655) `persistentDestructor`；
+   [src/proxy.cc:515–516](../../../nccl/src/proxy.cc#L515) `ncclLocalOpAppend` 的复制与引用交接。
+5. **FIFO 完成边界**：[src/enqueue/enqueue.cc:2028](../../../nccl/src/enqueue/enqueue.cc#L2028) `KernelFinishCallback_fn`、
+   [2037](../../../nccl/src/enqueue/enqueue.cc#L2037) `ncclLaunchFinish`；
+   [src/include/comm.h:916–935](../../../nccl/src/include/comm.h#L916) `ncclCommPollEventCallbacks` 确认事件后执行回调。
+6. **收尾协调**：[src/init.cc:3122](../../../nccl/src/init.cc#L3122) `commDestroySync`；
+   [3255–3307](../../../nccl/src/init.cc#L3255) `commReclaim` 的最后到达者与并发收尾。
 
 ## 9. 离线任务：为一次 AllReduce 画三条寿命线
 
@@ -218,4 +218,4 @@ GPU 一轮完成后，Graph 仍可持有 U 的注册关系；B 的 MR 由连接�
 
 这项任务只需本地源码；本章未执行 GPU 实验。
 
-下一章：[开发工作流](../10-development-workflow.md)。
+下一章：[开发工作流](../../10-development-workflow.md)。

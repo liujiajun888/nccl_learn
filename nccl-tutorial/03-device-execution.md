@@ -9,7 +9,7 @@ blockIdx.x → channelId → 装载 devComm/channel/work
            → devFuncId 分派 → RunWorkColl → runRing → Primitives
 ```
 
-进阶协议、slice/step 和 FIFO 细节见 [Device 执行进阶附录](appendix/device-execution.md)。
+进阶协议、slice/step 和 FIFO 细节见 [Device 执行进阶附录](appendix/deep-dive/device-execution.md)。
 
 ## 1. 继续使用最小例子
 
@@ -187,4 +187,4 @@ blockIdx + channelMask
 
 下一步读 [04｜集合算法](04-algorithms.md)，用完整的四 rank 例子理解 Ring 为什么不会漏加或重复加贡献。
 
-需要研究 CTA 内线程角色、chunk/slice/step、LL/LL128 和 FIFO 可见性时，再读 [Device 执行进阶附录](appendix/device-execution.md)。
+需要研究 CTA 内线程角色、chunk/slice/step、LL/LL128 和 FIFO 可见性时，再读 [Device 执行进阶附录](appendix/deep-dive/device-execution.md)。

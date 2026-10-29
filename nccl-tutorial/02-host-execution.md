@@ -2,7 +2,7 @@
 
 第一次学习建议先读 [00｜初学者主线](00-mainline.md)。本章不追求覆盖所有字段，而是用一个小例子看清：**一次 `ncclAllReduce` 怎样经过 task、调优、work 和 plan，最后变成 CUDA launch。**
 
-进阶的队列、channel 调度和 FIFO 细节移到 [Host 执行进阶附录](appendix/host-execution.md)。
+进阶的队列、channel 调度和 FIFO 细节移到 [Host 执行进阶附录](appendix/deep-dive/host-execution.md)。
 
 ## 1. 先把例子和主线固定下来
 
@@ -214,4 +214,4 @@ plan、FIFO、注册和映射都能立即回收
 
 下一步读 [03｜Device execution](03-device-execution.md)：看 CTA 怎样从 `channelMask` 找到 channel，再装载 `devComm`、channel 和 work，最终进入 `runRing`。
 
-需要研究 planner 队列、channel 调度、FIFO 容量和回收细节时，再读 [Host 执行进阶附录](appendix/host-execution.md)。
+需要研究 planner 队列、channel 调度、FIFO 容量和回收细节时，再读 [Host 执行进阶附录](appendix/deep-dive/host-execution.md)。

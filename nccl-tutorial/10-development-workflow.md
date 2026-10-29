@@ -2,7 +2,7 @@
 
 前九章已经建立软件栈地图。现在不再继续加新概念，而是完成一个最小开发任务：**给普通 AllReduce 的任务选择结果增加一条日志，并证明它没有改变通信行为。**
 
-完整命令、字段类型和构建细节见 [开发工作流进阶附录](appendix/development-workflow.md)。
+完整命令、字段类型和构建细节见 [开发工作流进阶附录](appendix/deep-dive/development-workflow.md)。
 
 ## 1. 先判断需求属于哪一层
 
@@ -136,4 +136,4 @@ device 模板/生成器
 
 下一步读 [11｜验证与调试](11-testing-and-debugging.md)，用分层证据判断问题发生在初始化、连接、提交、GPU、网络还是回收阶段。
 
-需要完整构建命令、观察日志位置、nccl-tests 参数和回归矩阵时，再读 [开发工作流进阶附录](appendix/development-workflow.md)。
+需要完整构建命令、观察日志位置、nccl-tests 参数和回归矩阵时，再读 [开发工作流进阶附录](appendix/deep-dive/development-workflow.md)。

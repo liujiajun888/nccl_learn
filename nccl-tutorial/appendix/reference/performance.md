@@ -138,9 +138,9 @@ bucket 是把若干梯度合成一次通信的缓冲；关键路径是决定本�
 
 | 路径:行 | 符号与解释范围 |
 | --- | --- |
-| [nccl/src/tuning/tuning_general.cc:52](../../nccl/src/tuning/tuning_general.cc#L52) | `ncclTuningGetTime`：延迟项加数据/带宽项 |
-| [nccl-tests/src/common.cu:554](../../nccl-tests/src/common.cu#L554) | `startColl`：totalnbytes、steps、shift 与指针轮换 |
-| [nccl-tests/src/common.cu:720](../../nccl-tests/src/common.cu#L720) | `BenchTime`：profile 阶段与主表计时边界 |
-| [nccl-tests/src/all_reduce.cu:59](../../nccl-tests/src/all_reduce.cu#L59) | `AllReduceGetBw`：algbw 与固定 busbw 系数 |
+| [nccl/src/tuning/tuning_general.cc:52](../../../nccl/src/tuning/tuning_general.cc#L52) | `ncclTuningGetTime`：延迟项加数据/带宽项 |
+| [nccl-tests/src/common.cu:554](../../../nccl-tests/src/common.cu#L554) | `startColl`：totalnbytes、steps、shift 与指针轮换 |
+| [nccl-tests/src/common.cu:720](../../../nccl-tests/src/common.cu#L720) | `BenchTime`：profile 阶段与主表计时边界 |
+| [nccl-tests/src/all_reduce.cu:59](../../../nccl-tests/src/all_reduce.cu#L59) | `AllReduceGetBw`：algbw 与固定 busbw 系数 |
 
-选择机制回查[04 算法](../04-algorithms.md)，网络推进回查[08 proxy 与网络](../08-proxy-and-network.md)，状态停滞回查[11 验证与调试](../11-testing-and-debugging.md)。
+选择机制回查[04 算法](../../04-algorithms.md)，网络推进回查[08 proxy 与网络](../../08-proxy-and-network.md)，状态停滞回查[11 验证与调试](../../11-testing-and-debugging.md)。

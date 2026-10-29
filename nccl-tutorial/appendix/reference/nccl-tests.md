@@ -26,7 +26,7 @@ env LD_LIBRARY_PATH="$ROOT/nccl/build/lib:$CUDA_LIB${LD_LIBRARY_PATH:+:$LD_LIBRA
 
 `NCCL_HOME` 给编译器头文件和链接搜索路径，`LD_LIBRARY_PATH` 决定运行时库搜索。
 核对 `ldd` 中的 NCCL 路径；启动报告的 `nccl-headers` 和 `nccl-library` 在本版应为 23203。
-同一版本号仍可有不同补丁，构建/加载身份的完整核验见[第 10 章](../10-development-workflow.md)。
+同一版本号仍可有不同补丁，构建/加载身份的完整核验见[第 10 章](../../10-development-workflow.md)。
 
 ## 2. 一个固定 64 KiB 的合法用例
 
@@ -140,11 +140,11 @@ env LD_LIBRARY_PATH="$ROOT/nccl/build/lib:$CUDA_LIB:$MPI_HOME/lib:$MPI_HOME/lib6
 
 | 路径:行 | 符号与用途 |
 | --- | --- |
-| [nccl-tests/src/Makefile:24](../../nccl-tests/src/Makefile#L24) | `NCCL_HOME`、`MPI`：头文件与链接路径 |
-| [nccl-tests/src/common.cu:720](../../nccl-tests/src/common.cu#L720) | `BenchTime`：预热、计时、校验边界 |
-| [nccl-tests/src/timer.cc:8](../../nccl-tests/src/timer.cc#L8) | `now`、`timer::elapsed`：steady_clock |
-| [nccl-tests/src/common.cu:324](../../nccl-tests/src/common.cu#L324) | `Allreduce`：先聚合耗时再计算带宽 |
-| [nccl-tests/src/all_reduce.cu:34](../../nccl-tests/src/all_reduce.cu#L34) | `AllReduceGetCollByteCount`；59 行 `AllReduceGetBw` |
-| [nccl-tests/src/util.cu:719](../../nccl-tests/src/util.cu#L719) | `writeDeviceReport`：版本、rank、可见设备映射 |
+| [nccl-tests/src/Makefile:24](../../../nccl-tests/src/Makefile#L24) | `NCCL_HOME`、`MPI`：头文件与链接路径 |
+| [nccl-tests/src/common.cu:720](../../../nccl-tests/src/common.cu#L720) | `BenchTime`：预热、计时、校验边界 |
+| [nccl-tests/src/timer.cc:8](../../../nccl-tests/src/timer.cc#L8) | `now`、`timer::elapsed`：steady_clock |
+| [nccl-tests/src/common.cu:324](../../../nccl-tests/src/common.cu#L324) | `Allreduce`：先聚合耗时再计算带宽 |
+| [nccl-tests/src/all_reduce.cu:34](../../../nccl-tests/src/all_reduce.cu#L34) | `AllReduceGetCollByteCount`；59 行 `AllReduceGetBw` |
+| [nccl-tests/src/util.cu:719](../../../nccl-tests/src/util.cu#L719) | `writeDeviceReport`：版本、rank、可见设备映射 |
 
-执行失败时回到[11 验证与调试](../11-testing-and-debugging.md)，分析性能时转到[性能附录](performance.md)。
+执行失败时回到[11 验证与调试](../../11-testing-and-debugging.md)，分析性能时转到[性能附录](performance.md)。

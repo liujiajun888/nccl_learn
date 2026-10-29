@@ -1,8 +1,8 @@
 # 进阶参考：Host execution 的字段与实现细节
 
-这份附录保留原 Host 执行章的进阶内容，适合已经读懂 [初学者主线](../00-mainline.md) 和 [02 Host 执行主线](../02-host-execution.md) 后查阅。首次学习不建议从本文开始。
+这份附录保留原 Host 执行章的进阶内容，适合已经读懂 [初学者主线](../../00-mainline.md) 和 [02 Host 执行主线](../../02-host-execution.md) 后查阅。首次学习不建议从本文开始。
 
-承接 [07｜传输](../07-transports.md)，连接已经说明了数据能怎样到达 peer。
+承接 [07｜传输](../../07-transports.md)，连接已经说明了数据能怎样到达 peer。
 本章沿一次请求看主机如何选择执行方式，并把材料交给 GPU 和 CPU proxy。
 源码基线为 NCCL **2.32.3**，`12df1a11`。
 
@@ -190,18 +190,18 @@ GPU 与 proxy 随后通过协议状态协作，网络传输并不要求主机调
 
 回收按对象的最后使用者安排：非 persistent plan 交接后可进入主机回收队列，
 work FIFO 容量则由 launch stream 完成事件确认后返还，用户 buffer 保持到通信完成。
-图持有的描述与注册引用会更长寿，统一见 [09｜内存与生命周期](../09-memory-and-lifetime.md)。
+图持有的描述与注册引用会更长寿，统一见 [09｜内存与生命周期](../../09-memory-and-lifetime.md)。
 
 ## 6. 源码入口与离线追踪
 
 下面六处足以把本章的数据流接起来，行号对应上述基线：
 
-- [collectives.cc:192、206](../../nccl/src/collectives.cc#L192)：`ncclAllReduceConfigImpl`、`ncclAllReduce`，构造请求。
-- [enqueue.cc:3478](../../nccl/src/enqueue/enqueue.cc#L3478)：`ncclEnqueueCheck`；向上追 3337 的 `taskAppend`、2757 的 `collTaskAppend`。
-- [comm.h:485](../../nccl/src/include/comm.h#L485)：`ncclKernelPlanner`；同文件 212、357 为 task 与 plan。
-- [group.cc:748](../../nccl/src/group.cc#L748)：`groupLaunchLegacy`；427 的 `doLaunches` 串联准备与逐 plan 发射。
-- [enqueue.cc:644](../../nccl/src/enqueue/enqueue.cc#L644)：`scheduleCollTasksToPlan`；1365 的 `uploadWork` 完成描述交接。
-- [enqueue.cc:1695](../../nccl/src/enqueue/enqueue.cc#L1695)：`ncclLaunchPrepare`；1886 的 `ncclLaunchKernel` 与 140 的 `ncclAddProxyOpIfNeeded` 对应两路出口。
+- [collectives.cc:192、206](../../../nccl/src/collectives.cc#L192)：`ncclAllReduceConfigImpl`、`ncclAllReduce`，构造请求。
+- [enqueue.cc:3478](../../../nccl/src/enqueue/enqueue.cc#L3478)：`ncclEnqueueCheck`；向上追 3337 的 `taskAppend`、2757 的 `collTaskAppend`。
+- [comm.h:485](../../../nccl/src/include/comm.h#L485)：`ncclKernelPlanner`；同文件 212、357 为 task 与 plan。
+- [group.cc:748](../../../nccl/src/group.cc#L748)：`groupLaunchLegacy`；427 的 `doLaunches` 串联准备与逐 plan 发射。
+- [enqueue.cc:644](../../../nccl/src/enqueue/enqueue.cc#L644)：`scheduleCollTasksToPlan`；1365 的 `uploadWork` 完成描述交接。
+- [enqueue.cc:1695](../../../nccl/src/enqueue/enqueue.cc#L1695)：`ncclLaunchPrepare`；1886 的 `ncclLaunchKernel` 与 140 的 `ncclAddProxyOpIfNeeded` 对应两路出口。
 
 **离线任务：追踪同一个 `grad` 指针。**
 从 `ncclInfo.sendbuff` 出发，依次找 task 的赋值、设备 work 的赋值、work 上传和 driver 参数。
@@ -211,4 +211,4 @@ work FIFO 容量则由 launch stream 完成事件确认后返还，用户 buffer
 1425 行复制 work 元数据，1902 行把参数缓冲交给 launch。
 Channel 2 从 `8*1024*1024` 个 FP32 元素处开始，即 **32 MiB** 偏移；payload 没被复制进 task。
 
-下一章 [03｜Device execution](../03-device-execution.md) 从这份 launch 参数出发，看 CTA 如何真正执行它。
+下一章 [03｜Device execution](../../03-device-execution.md) 从这份 launch 参数出发，看 CTA 如何真正执行它。

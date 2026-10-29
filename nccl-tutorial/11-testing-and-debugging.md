@@ -2,7 +2,7 @@
 
 上一章只增加了一条选择日志。本章的任务是：**怎样证明改动正确，以及出现问题时先查哪一层，而不是凭感觉修改配置。**
 
-完整回归命令、日志文件管理和性能对照见 [测试与调试进阶附录](appendix/testing-and-debugging.md)。
+完整回归命令、日志文件管理和性能对照见 [测试与调试进阶附录](appendix/deep-dive/testing-and-debugging.md)。
 
 ## 1. 先找最后一个确定完成的阶段
 
@@ -150,4 +150,4 @@ oop/ip、校验和日志级别
 
 至此，`00–11` 的主线形成闭环：理解职责，找到对象，观察交接，再用分层证据验收。
 
-需要完整 baseline/observed 脚本、日志文件管理、回归矩阵和性能对照时，再读 [测试与调试进阶附录](appendix/testing-and-debugging.md)。
+需要完整 baseline/observed 脚本、日志文件管理、回归矩阵和性能对照时，再读 [测试与调试进阶附录](appendix/deep-dive/testing-and-debugging.md)。

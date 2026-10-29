@@ -9,7 +9,7 @@
 | [mpi_allreduce.cu](mpi_allreduce.cu) | 每个 MPI 进程管理一张 GPU | 上述环境加 MPI |
 | [Makefile](Makefile) | 构建两个 GPU 示例 | 单进程用 nvcc，MPI 版用 mpicxx |
 
-命令从项目根目录执行。GPU 实验使用获分配的设备；先完成 [环境准备](../appendix/environment.md)。本次 macOS 环境未编译或运行 GPU/MPI 示例。
+命令从项目根目录执行。GPU 实验使用获分配的设备；先完成 [环境准备](../appendix/reference/environment.md)。本次 macOS 环境未编译或运行 GPU/MPI 示例。
 
 ## 1. CPU：追踪一个块的完整旅程
 
@@ -34,7 +34,7 @@ PASS: 6 rounds; sent per rank = 12 elements
 
 阅读 `ring_allreduce` 时看两个设计：每轮先快照所有发送，再统一接收；`sources` 集合记录已经加入的 rank。前者让一轮只前进一跳，后者验证每份贡献恰好加入一次。
 
-本模拟的 ReduceScatter 阶段结束后，rank r 持有块 `(r+1)%P`。这是所选 Ring 调度的中间归属；公开 ReduceScatter API 的结果按 rank r 的第 r 块布局，见[接口附录](../appendix/collectives.md)。
+本模拟的 ReduceScatter 阶段结束后，rank r 持有块 `(r+1)%P`。这是所选 Ring 调度的中间归属；公开 ReduceScatter API 的结果按 rank r 的第 r 块布局，见[接口附录](../appendix/reference/collectives.md)。
 
 `--self-test` 覆盖 85 个用例，包括不同 rank 数、块长、带符号整数和非法形状。它验证数学与调度，第 03 章的 GPU 协议和第 08 章的网络推进另有实现。
 
@@ -125,6 +125,6 @@ MPI 版没有自定义 device kernel，因此 Makefile 用 `mpicxx -x c++` 编�
 - CPU 模拟与自测：验证块流转和求和结果。
 - GPU 单进程示例：验证本地多设备参与、提交、完成和结果。
 - MPI 示例：增加跨进程引导与设备映射。
-- [nccl-tests](../appendix/nccl-tests.md)：扩展数据规模、操作、模式并测量性能。
+- [nccl-tests](../appendix/reference/nccl-tests.md)：扩展数据规模、操作、模式并测量性能。
 
 回到[教程首页](../README.md)。

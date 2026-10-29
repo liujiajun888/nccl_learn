@@ -6,7 +6,7 @@
 ncclTopoSystem → paths → ncclTopoGraph → channels[c].ring/tree
 ```
 
-目标是分清：**硬件怎样连接、NCCL 怎样选路、最后怎样形成 Ring/Tree 邻居。** 搜索预算、XML 字段和特殊路径类型留到 [Topology 进阶附录](appendix/topology.md)。
+目标是分清：**硬件怎样连接、NCCL 怎样选路、最后怎样形成 Ring/Tree 邻居。** 搜索预算、XML 字段和特殊路径类型留到 [Topology 进阶附录](appendix/deep-dive/topology.md)。
 
 ## 1. 三类对象分别是什么？
 
@@ -169,4 +169,4 @@ rings[c][...]
 
 下一步读 [07｜Transports](07-transports.md)，看这些逻辑邻居怎样变成可访问的 buffer、映射和连接。
 
-需要 XML 融合、路径类型、PXN、搜索回溯和 rail/crossNic 细节时，再读 [Topology 进阶附录](appendix/topology.md)。
+需要 XML 融合、路径类型、PXN、搜索回溯和 rail/crossNic 细节时，再读 [Topology 进阶附录](appendix/deep-dive/topology.md)。

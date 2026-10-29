@@ -1,6 +1,6 @@
 # 07｜Transports：把邻接变成可用连接
 
-> 阅读定位：进阶原文。先读 [07 Transport 主线](../07-transports.md)，再按 P2P、SHM 或 NET 的具体建连问题查阅。
+> 阅读定位：进阶原文。先读 [07 Transport 主线](../../07-transports.md)，再按 P2P、SHM 或 NET 的具体建连问题查阅。
 
 **Transport（传输实现）**负责把“给哪个 peer 收发数据”变成可访问的缓冲、映射和通信端点。
 算法确定通信关系，transport 为每条边准备实现；同一次 AllReduce 的不同边可以采用不同传输方式。
@@ -64,7 +64,7 @@ comm->channels[c]
 网络握手尚未完成时，connect 可返回 `ncclInProgress`，协调层继续推进直到所需连接成功。
 
 成功后，协调层设置 `connected`，把 `conn` 异步复制到设备侧，并安排内部 stream 依赖，使后续执行看到已准备的连接信息。
-资源回收由 connector 的 `free` 和服务端的 `proxyFree` 分担；完整释放顺序放在 [09｜内存与生命周期](../09-memory-and-lifetime.md)。
+资源回收由 connector 的 `free` 和服务端的 `proxyFree` 分担；完整释放顺序放在 [09｜内存与生命周期](../../09-memory-and-lifetime.md)。
 
 ## 3. P2P 与 SHM：谁访问缓冲，缓冲在哪里
 
@@ -127,7 +127,7 @@ GPU → host buffer → NIC → 网络 → NIC → host buffer → GPU
 使用 host 缓冲时，GPU 可以直接访问其映射，主机 CPU 主要承担网络操作与状态管理。
 
 在这里选定的主机代理分支中，GPU 生产或消费分片，proxy 调用网络发送/接收接口并检查完成，网卡执行网络数据搬运。
-详细的请求状态、槽位回收和接收可见性放在 [08｜Proxy 与网络](../08-proxy-and-network.md)。
+详细的请求状态、槽位回收和接收可见性放在 [08｜Proxy 与网络](../../08-proxy-and-network.md)。
 
 ## 5. 具体交接：把 r1→r5 变成可提交的连接
 
@@ -149,12 +149,12 @@ GPU → host buffer → NIC → 网络 → NIC → host buffer → GPU
 
 ## 6. 源码入口与无 GPU 阅读任务
 
-- [`src/include/transport.h:129` · `ncclTransportComm`](../../nccl/src/include/transport.h#L129)、[`src/include/device.h:136` · `ncclConnInfo`](../../nccl/src/include/device.h#L136) 和 [`device.h:168` · `ncclConnector`](../../nccl/src/include/device.h#L168)：对照实现回调、主机管理对象与设备连接信息。
-- [`src/transport.cc:23` · `selectTransport`](../../nccl/src/transport.cc#L23) 与 [`125` · `ncclTransportP2pSetup`](../../nccl/src/transport.cc#L125)：选择、setup、描述交换、connect 和设备复制的协调层。
-- [`src/transport/p2p.cc:393` · `p2pSendSetup`](../../nccl/src/transport/p2p.cc#L393)：457～466 行请求 proxy 并映射资源；[`267` · `ncclP2pImportShareableBuffer`](../../nccl/src/transport/p2p.cc#L267) 展示跨进程导入。
-- [`src/transport/shm.cc:153` · `shmSendConnect`](../../nccl/src/transport/shm.cc#L153)：导入共享内存并填连接字段；[`467` · `shmTransport`](../../nccl/src/transport/shm.cc#L467) 展示 service 与空 progress 回调。
-- [`src/transport/net.cc:296` · `sendSetup`](../../nccl/src/transport/net.cc#L296) 与 [`450` · `sendConnect`](../../nccl/src/transport/net.cc#L450)：选择网络资源、请求 service、接收映射表并填充连接信息。
-- [`src/transport/net.cc:793` · `recvProxySetup`](../../nccl/src/transport/net.cc#L793) 与 [`858` · `sendProxyConnect`](../../nccl/src/transport/net.cc#L858)：定位监听 handle、网络连接、缓冲及 MR 注册的准备位置。
+- [`src/include/transport.h:129` · `ncclTransportComm`](../../../nccl/src/include/transport.h#L129)、[`src/include/device.h:136` · `ncclConnInfo`](../../../nccl/src/include/device.h#L136) 和 [`device.h:168` · `ncclConnector`](../../../nccl/src/include/device.h#L168)：对照实现回调、主机管理对象与设备连接信息。
+- [`src/transport.cc:23` · `selectTransport`](../../../nccl/src/transport.cc#L23) 与 [`125` · `ncclTransportP2pSetup`](../../../nccl/src/transport.cc#L125)：选择、setup、描述交换、connect 和设备复制的协调层。
+- [`src/transport/p2p.cc:393` · `p2pSendSetup`](../../../nccl/src/transport/p2p.cc#L393)：457～466 行请求 proxy 并映射资源；[`267` · `ncclP2pImportShareableBuffer`](../../../nccl/src/transport/p2p.cc#L267) 展示跨进程导入。
+- [`src/transport/shm.cc:153` · `shmSendConnect`](../../../nccl/src/transport/shm.cc#L153)：导入共享内存并填连接字段；[`467` · `shmTransport`](../../../nccl/src/transport/shm.cc#L467) 展示 service 与空 progress 回调。
+- [`src/transport/net.cc:296` · `sendSetup`](../../../nccl/src/transport/net.cc#L296) 与 [`450` · `sendConnect`](../../../nccl/src/transport/net.cc#L450)：选择网络资源、请求 service、接收映射表并填充连接信息。
+- [`src/transport/net.cc:793` · `recvProxySetup`](../../../nccl/src/transport/net.cc#L793) 与 [`858` · `sendProxyConnect`](../../../nccl/src/transport/net.cc#L858)：定位监听 handle、网络连接、缓冲及 MR 注册的准备位置。
 
 **阅读任务：只追 SHM 发送端，解释“有 proxy service，但 GPU 搬 payload”。**
 
@@ -166,4 +166,4 @@ GPU → host buffer → NIC → 网络 → NIC → host buffer → GPU
 `transport.cc:249–255` 设置连接标志并复制 `ncclConnInfo`，361 行安排内部 stream 等待关系。
 由此可以看出：CPU 准备资源，GPU 使用映射后的地址执行常规 SHM 数据协议。
 
-下一章：[02｜Host execution：从 API 任务到执行计划](../02-host-execution.md)。
+下一章：[02｜Host execution：从 API 任务到执行计划](../../02-host-execution.md)。

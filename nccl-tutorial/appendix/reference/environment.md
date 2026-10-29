@@ -16,7 +16,7 @@ nvcc --version
 
 前两项标识代码版本；`nvidia-smi` 查看驱动和设备；`topo -m` 提供 GPU、CPU、NIC 的距离信息；`nvcc` 来自用于构建的 Toolkit。
 
-`nvidia-smi` 显示的 CUDA 版本表示驱动支持能力，Toolkit 版本看 `nvcc`。基线提交见[首页](../README.md)。
+`nvidia-smi` 显示的 CUDA 版本表示驱动支持能力，Toolkit 版本看 `nvcc`。基线提交见[首页](../../README.md)。
 
 ## 2. 构建本地库与测试
 
@@ -42,7 +42,7 @@ make -C nccl-tutorial/examples \
 - `nccl-tests/build/`：集合通信测试程序。
 - `nccl-tutorial/examples/build/`：教程的单进程示例。
 
-构建 GPU kernel 可能较久。只面向一类 GPU 开发时，可以按 [nccl/README.md:30](../../nccl/README.md#L30) 的 `NVCC_GENCODE` 配置缩小目标架构集合，取值与测试 GPU 的 compute capability 对应。
+构建 GPU kernel 可能较久。只面向一类 GPU 开发时，可以按 [nccl/README.md:30](../../../nccl/README.md#L30) 的 `NVCC_GENCODE` 配置缩小目标架构集合，取值与测试 GPU 的 compute capability 对应。
 
 ## 3. 确认运行时加载的库
 
@@ -83,7 +83,7 @@ mpirun -np 2 ./nccl-tutorial/examples/build/mpi_allreduce
 
 这份示例采用独占整卡映射：进程只看到一张卡时选 device 0；看到同一完整设备列表时按 local rank 选卡。程序会检查同主机 PCI device 重复选择。
 
-多机启动沿用集群的 MPI/调度器配置，把相同程序、库路径和环境传到各节点。具体引导流程见[示例说明](../examples/README.md)。
+多机启动沿用集群的 MPI/调度器配置，把相同程序、库路径和环境传到各节点。具体引导流程见[示例说明](../../examples/README.md)。
 
 ## 6. 没有 GPU 时做什么
 
@@ -98,4 +98,4 @@ Python 程序验证 Ring 的块传递和求和结果；`make -n` 展示构建命
 
 本次教材整理环境为 macOS，未执行上面的 GPU/MPI 实验。
 
-回到[教程首页](../README.md)，或从 [00｜初学者主线](../00-mainline.md) 开始阅读。
+回到[教程首页](../../README.md)，或从 [00｜初学者主线](../../00-mainline.md) 开始阅读。

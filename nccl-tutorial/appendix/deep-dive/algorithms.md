@@ -1,8 +1,8 @@
 # 04｜集合算法：一块数据怎样汇合所有贡献
 
-> 阅读定位：进阶原文。先读 [04 集合算法主线](../04-algorithms.md)，理解 Ring 的正确性后，再查带宽推导、双树和候选组合。
+> 阅读定位：进阶原文。先读 [04 集合算法主线](../../04-algorithms.md)，理解 Ring 的正确性后，再查带宽推导、双树和候选组合。
 
-[上一章](../03-device-execution.md) 解释了 primitive 如何搬运、等待和发布一片数据。
+[上一章](../../03-device-execution.md) 解释了 primitive 如何搬运、等待和发布一片数据。
 本章把这些动作连起来，回答 Ring 为什么能得到 AllReduce，以及 Tree 改变了什么。
 源码基线为 NCCL **2.32.3**，`12df1a11`。
 
@@ -192,19 +192,19 @@ Tree 同样按 chunk 流水：较早的块可以向下广播，较晚的块仍�
 | Tree | AllReduce | Simple、LL、LL128 |
 
 其他入口中，NVLS、CollNet 引入不同层级或集合能力，PAT 面向 AG/RS；
-它们以及 symmetric/CE 路径统一放在 [现代特性附录](modern-features.md)。
+它们以及 symmetric/CE 路径统一放在 [现代特性附录](../features/modern-features.md)。
 调优先筛选有效候选，再比较估计成本，并可接受 tuner 插件的选择。
 开发时用 GRAPH 记录核对连线，用任务的 algorithm/protocol 和 channel 分区核对实际方案；
 本基线普通调度点 `enqueue.cc:912` 有 INFO/TUNING 记录，连线日志本身只描述拓扑。
 
 ## 6. 源码入口与 CPU 模拟
 
-- [all_reduce.h:14](../../nccl/src/device/all_reduce.h#L14)：`runRing`；64 行看阶段融合，146 行看 `runTreeSplit`。
-- [device.h:178](../../nccl/src/include/device.h#L178)：`ncclRing`，区分用户 rank、环位置与邻居。
-- [trees.cc:90](../../nccl/src/graph/trees.cc#L90)：`ncclGetDtree`；节点到 channel 的连接在 [connect.cc:138](../../nccl/src/graph/connect.cc#L138) 的 `connectTrees`。
-- [generate.py:104](../../nccl/src/device/generate.py#L104)：`algos_of_coll`；130 行的 `required_cuda` 继续筛选组合。
-- [tuning.cc:180](../../nccl/src/tuning/tuning.cc#L180)：`ncclTuningCompute`，候选估计、插件与选择。
-- [ring_simulator.py:6](../examples/ring_simulator.py#L6)：`ring_allreduce`，用贡献集合检查每跳是否重复计入。
+- [all_reduce.h:14](../../../nccl/src/device/all_reduce.h#L14)：`runRing`；64 行看阶段融合，146 行看 `runTreeSplit`。
+- [device.h:178](../../../nccl/src/include/device.h#L178)：`ncclRing`，区分用户 rank、环位置与邻居。
+- [trees.cc:90](../../../nccl/src/graph/trees.cc#L90)：`ncclGetDtree`；节点到 channel 的连接在 [connect.cc:138](../../../nccl/src/graph/connect.cc#L138) 的 `connectTrees`。
+- [generate.py:104](../../../nccl/src/device/generate.py#L104)：`algos_of_coll`；130 行的 `required_cuda` 继续筛选组合。
+- [tuning.cc:180](../../../nccl/src/tuning/tuning.cc#L180)：`ncclTuningCompute`，候选估计、插件与选择。
+- [ring_simulator.py:6](../../examples/ring_simulator.py#L6)：`ring_allreduce`，用贡献集合检查每跳是否重复计入。
 
 **离线任务：运行原有模拟器，并解释它与正文的块归属差异。**
 无需 GPU，在项目根目录运行：
@@ -219,4 +219,4 @@ python3 nccl-tutorial/examples/ring_simulator.py --self-test
 模拟器的 C0 从 R0 经 R1、R2 到 R3，RS 后归 R3；正文的 C0 从 R1 起发，最后归 R0。
 两种时序都使每份贡献恰好出现一次，再经 AG 得到同一完整结果。
 
-下一章 [08｜Proxy 与网络](../08-proxy-and-network.md) 沿跨机那条边，继续追 GPU、proxy 与网络请求的交接。
+下一章 [08｜Proxy 与网络](../../08-proxy-and-network.md) 沿跨机那条边，继续追 GPU、proxy 与网络请求的交接。

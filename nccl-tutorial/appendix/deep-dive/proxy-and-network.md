@@ -1,16 +1,16 @@
 # 08 Proxy 与网络：把 GPU 的一片数据送过网卡
 
-> 阅读定位：进阶原文。先读 [08 Proxy 与网络主线](../08-proxy-and-network.md)，再按 proxy op、request 或可见性问题查阅，适合定位“网络完成但 GPU 仍等待”。
+> 阅读定位：进阶原文。先读 [08 Proxy 与网络主线](../../08-proxy-and-network.md)，再按 proxy op、request 或可见性问题查阅，适合定位“网络完成但 GPU 仍等待”。
 
-[上一章：算法](../04-algorithms.md) · [教程主页](../README.md)
+[上一章：算法](../../04-algorithms.md) · [教程主页](../../README.md)
 
 沿用两台机器、每台 4 GPU、8 rank 各一进程的案例：
 每 rank 对 64 MiB FP32 数据做 Sum AllReduce，即 `count=16,777,216`。
 本章具体追 Ring/Simple 的一条跨机边，算法选择由前面的规划阶段决定。
 完整输入由算法分配给多个 channel，再切成逐步传输的片；网卡看到的是这些片的网络请求。
 
-[07](../07-transports.md) 已建立连接，[02](../02-host-execution.md) 已分出 proxyOp，
-[03](../03-device-execution.md) 已介绍 Simple 的槽位协议。
+[07](../../07-transports.md) 已建立连接，[02](../../02-host-execution.md) 已分出 proxyOp，
+[03](../../03-device-execution.md) 已介绍 Simple 的槽位协议。
 现在把这几部分接起来：谁把描述变成网络请求，谁发布可读状态，谁归还槽位。
 
 ## 1. Service 管连接，progress 推进在途工作
@@ -99,7 +99,7 @@ NET 插件接口按职责排列即可理解：
 
 `isend/irecv` 成功返回但 request 为空时，progress 保持当前计数，下一轮再试。
 一个 request 可以代表一组接收；`maxRecvs` 和共同的 recvComm 决定接收聚合。
-插件实现从这个契约接入，构建与验证流程放在 [10](../10-development-workflow.md)。
+插件实现从这个契约接入，构建与验证流程放在 [10](../../10-development-workflow.md)。
 
 ## 4. 一片数据经过四个控制状态
 
@@ -196,12 +196,12 @@ head/tail 持续前进，循环使用的是缓冲槽下标。
 
 以下位置按本地 NCCL `12df1a11` / `2.32.3` 核对：
 
-1. **控制服务**：[src/proxy.cc:1789](../../nccl/src/proxy.cc#L1789) `ncclProxyService`；[1626](../../nccl/src/proxy.cc#L1626) `proxyProgressAsync` 分派控制回调。
-2. **工作移交**：[src/proxy.cc:368](../../nccl/src/proxy.cc#L368) `ncclProxyOpToArgs`；[830](../../nccl/src/proxy.cc#L830) `ncclProxyGetPostedOps`、[951](../../nccl/src/proxy.cc#L951) `ncclProxyProgress`。
-3. **发送状态机**：[src/transport/net.cc:1324](../../nccl/src/transport/net.cc#L1324) `sendProxyProgress`；[526–531](../../nccl/src/transport/net.cc#L526) 是 `sendConnect` 的 conn 映射。
-4. **接收状态机**：[src/transport/net.cc:1493](../../nccl/src/transport/net.cc#L1493) `recvProxyProgress`；[603–609](../../nccl/src/transport/net.cc#L603) 是 `recvConnect` 的 conn 映射。
-5. **GPU 交接**：[src/device/prims_simple.h:103](../../nccl/src/device/prims_simple.h#L103) `waitPeer`、[167](../../nccl/src/device/prims_simple.h#L167) `postPeer`，结合 `loadRecvConn/loadSendConn`。
-6. **插件契约**：[src/include/plugin/net/net_v12.h:102–130](../../nccl/src/include/plugin/net/net_v12.h#L102) `ncclNet_v12_t` 的 MR、收发、完成与消费通知接口。
+1. **控制服务**：[src/proxy.cc:1789](../../../nccl/src/proxy.cc#L1789) `ncclProxyService`；[1626](../../../nccl/src/proxy.cc#L1626) `proxyProgressAsync` 分派控制回调。
+2. **工作移交**：[src/proxy.cc:368](../../../nccl/src/proxy.cc#L368) `ncclProxyOpToArgs`；[830](../../../nccl/src/proxy.cc#L830) `ncclProxyGetPostedOps`、[951](../../../nccl/src/proxy.cc#L951) `ncclProxyProgress`。
+3. **发送状态机**：[src/transport/net.cc:1324](../../../nccl/src/transport/net.cc#L1324) `sendProxyProgress`；[526–531](../../../nccl/src/transport/net.cc#L526) 是 `sendConnect` 的 conn 映射。
+4. **接收状态机**：[src/transport/net.cc:1493](../../../nccl/src/transport/net.cc#L1493) `recvProxyProgress`；[603–609](../../../nccl/src/transport/net.cc#L603) 是 `recvConnect` 的 conn 映射。
+5. **GPU 交接**：[src/device/prims_simple.h:103](../../../nccl/src/device/prims_simple.h#L103) `waitPeer`、[167](../../../nccl/src/device/prims_simple.h#L167) `postPeer`，结合 `loadRecvConn/loadSendConn`。
+6. **插件契约**：[src/include/plugin/net/net_v12.h:102–130](../../../nccl/src/include/plugin/net/net_v12.h#L102) `ncclNet_v12_t` 的 MR、收发、完成与消费通知接口。
 
 ## 8. 离线任务：给一片数据标出交接证据
 
@@ -218,4 +218,4 @@ head/tail 持续前进，循环使用的是缓冲槽下标。
 
 这项任务只需本地源码；本章未执行 GPU 或网络实验。
 
-下一章：[内存与生命周期](../09-memory-and-lifetime.md)。
+下一章：[内存与生命周期](../../09-memory-and-lifetime.md)。

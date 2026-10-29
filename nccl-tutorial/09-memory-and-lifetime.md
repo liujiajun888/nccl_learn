@@ -2,7 +2,7 @@
 
 前面已经看到多种地址：用户 buffer、协议缓冲、共享映射、MR、work 和 proxy 请求。它们并不是同一种对象，也不能在同一时刻统一释放。
 
-本章只用三类对象理解生命周期：**U（用户内存）、B（内部缓冲）、D（执行描述）。** 具体字段和回收队列见 [内存与生命周期进阶附录](appendix/memory-and-lifetime.md)。
+本章只用三类对象理解生命周期：**U（用户内存）、B（内部缓冲）、D（执行描述）。** 具体字段和回收队列见 [内存与生命周期进阶附录](appendix/deep-dive/memory-and-lifetime.md)。
 
 ## 1. 先分清三类对象
 
@@ -148,4 +148,4 @@ Graph 捕获的 plan 需要为重放保留 work、proxy 描述和清理回调，
 
 下一步读 [10｜开发工作流](10-development-workflow.md)，把这条软件栈地图用于第一次小改动。
 
-需要注册缓存字段、回收队列、persistentDestructor 和 Finalize/Destroy 的具体协调时，再读 [内存与生命周期进阶附录](appendix/memory-and-lifetime.md)。
+需要注册缓存字段、回收队列、persistentDestructor 和 Finalize/Destroy 的具体协调时，再读 [内存与生命周期进阶附录](appendix/deep-dive/memory-and-lifetime.md)。

@@ -1,8 +1,8 @@
 # 11 验证与调试：沿执行阶段缩小问题
 
-> 阅读定位：进阶操作手册。先读 [11 验证与调试主线](../11-testing-and-debugging.md)，再按实际复现场景选择脚本和回归矩阵，不适合只作理论通读。
+> 阅读定位：进阶操作手册。先读 [11 验证与调试主线](../../11-testing-and-debugging.md)，再按实际复现场景选择脚本和回归矩阵，不适合只作理论通读。
 
-[上一章](../10-development-workflow.md)增加了 task 选择日志。
+[上一章](../../10-development-workflow.md)增加了 task 选择日志。
 本章验证三件事：加载了改动后的库，记录了正确状态，原来的通信仍然算对并完成。
 主场景仍是两机各四 GPU、八 rank，每 rank 64 MiB FP32 Sum AllReduce，按 Ring/Simple 追踪。
 机器布局是教学假设；当前源码基线为 NCCL `12df1a11`（2.32.3），tests 为 `b4d5bee`（2.20.0）。
@@ -165,7 +165,7 @@ NCCL 展开 `%h/%p` 为主机名和 PID；每次使用新目录，因为同名�
 两个版本的已有 tuning 日志应选择相同算法/协议，观察版另有 count=16384 的新日志。
 若新日志缺失，按“库路径—DEBUG 子系统—运行时分支—观察点是否执行”的顺序核查。
 随后保留观察构建、将日志级别降到 WARN，与相同日志级别的基线比较重复运行时间。
-这样分开验证日志输出和低观测开销下的回归；完整 profile 方法见[性能附录](performance.md)。
+这样分开验证日志输出和低观测开销下的回归；完整 profile 方法见[性能附录](../reference/performance.md)。
 
 ### 按改动收敛回归矩阵
 
@@ -180,19 +180,19 @@ NCCL 展开 `%h/%p` 为主机名和 PID；每次使用新目录，因为同名�
 仅增加日志时，先完成固定用例和八 rank 主场景；改选择阈值则增加阈值两侧及自动选择。
 改 device 分块时扩大 count/datatype/op；改 transport 时扩大跨进程与目标连接组合。
 所有 rank 使用匹配的操作、count、datatype 和顺序，通过合法输入变化检查边界。
-八 rank 的启动模板见[测试附录](nccl-tests.md)，保持每 rank 64 MiB 时 count=16777216。
+八 rank 的启动模板见[测试附录](../reference/nccl-tests.md)，保持每 rank 64 MiB 时 count=16777216。
 本章交付是基线/观察版的库身份、日志、正确性结果，以及本次实际覆盖的回归范围。
 
 ## 7. 六个源码锚点
 
 | 路径:行 | 符号与证据 |
 | --- | --- |
-| [nccl/src/init.cc:2105](../../nccl/src/init.cc#L2105) | `ncclCommInitRankFunc`；3934 行 `ncclCommGetAsyncError`：初始化与异步状态 |
-| [nccl/src/group.cc:282](../../nccl/src/group.cc#L282) | `ncclPrepareTasksAndCollPreconnectFunc`：选择到连接准备 |
-| [nccl/src/enqueue/enqueue.cc:1886](../../nccl/src/enqueue/enqueue.cc#L1886) | `ncclLaunchKernel`；1589 行 `reclaimPlan`：提交与主机回收 |
-| [nccl/src/device/prims_simple.h:103](../../nccl/src/device/prims_simple.h#L103) | `waitPeer`；167 行 `postPeer`：等待与发布条件 |
-| [nccl/src/transport/net.cc:1324](../../nccl/src/transport/net.cc#L1324) | `sendProxyProgress`；1493 行 `recvProxyProgress`：请求提交与完成 |
-| [nccl-tests/src/common.cu:496](../../nccl-tests/src/common.cu#L496) | `testStreamSynchronize`：CUDA query、异步检查、测试超时 |
+| [nccl/src/init.cc:2105](../../../nccl/src/init.cc#L2105) | `ncclCommInitRankFunc`；3934 行 `ncclCommGetAsyncError`：初始化与异步状态 |
+| [nccl/src/group.cc:282](../../../nccl/src/group.cc#L282) | `ncclPrepareTasksAndCollPreconnectFunc`：选择到连接准备 |
+| [nccl/src/enqueue/enqueue.cc:1886](../../../nccl/src/enqueue/enqueue.cc#L1886) | `ncclLaunchKernel`；1589 行 `reclaimPlan`：提交与主机回收 |
+| [nccl/src/device/prims_simple.h:103](../../../nccl/src/device/prims_simple.h#L103) | `waitPeer`；167 行 `postPeer`：等待与发布条件 |
+| [nccl/src/transport/net.cc:1324](../../../nccl/src/transport/net.cc#L1324) | `sendProxyProgress`；1493 行 `recvProxyProgress`：请求提交与完成 |
+| [nccl-tests/src/common.cu:496](../../../nccl-tests/src/common.cu#L496) | `testStreamSynchronize`：CUDA query、异步检查、测试超时 |
 
 至此，初学者主线到 11 验证调试形成闭环：理解职责，找到对象，修改交接点，再用分层证据验收。
-[环境](environment.md)与[示例](../examples/README.md)并行使用；[操作](collectives.md)、[现代特性](modern-features.md)、[tests](nccl-tests.md)、[性能](performance.md)四个附录按需查阅。
+[环境](../reference/environment.md)与[示例](../../examples/README.md)并行使用；[操作](../reference/collectives.md)、[现代特性](../features/modern-features.md)、[tests](../reference/nccl-tests.md)、[性能](../reference/performance.md)四个附录按需查阅。

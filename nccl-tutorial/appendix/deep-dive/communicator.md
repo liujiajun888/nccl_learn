@@ -1,6 +1,6 @@
 # 05｜初始化：从应用 API 到可执行的通信团队
 
-> 阅读定位：进阶原文。先读 [05 Communicator 主线](../05-communicator.md)，用于补充初始化 API 和阶段细节；不建议与初始化长篇精读同时顺序通读。
+> 阅读定位：进阶原文。先读 [05 Communicator 主线](../../05-communicator.md)，用于补充初始化 API 和阶段细节；不建议与初始化长篇精读同时顺序通读。
 
 初始化是 NCCL 中跨模块最广的工作之一：它把独立的进程、GPU 和网络资源组织成一个通信团队。应用只需调用少量 API，内部则要完成成员会合、拓扑发现、通信图构造、资源连接和设备状态准备。
 
@@ -29,7 +29,7 @@ Config 是 InitRank 的可配置形式。用 `NCCL_CONFIG_INITIALIZER` 初始化
 
 InitAll 在内部生成 ID、逐卡选设备并组织 group。理解多进程流程后，就能看懂它封装了哪些工作。
 
-公共契约见 [nccl.h.in:275–301](../../nccl/src/nccl.h.in#L275)，Scalable 见 [nccl.h.in:365](../../nccl/src/nccl.h.in#L365)。两个完整用法分别在[单进程示例](../examples/single_process_allreduce.cu#L73)和[MPI 示例](../examples/mpi_allreduce.cu#L82)。
+公共契约见 [nccl.h.in:275–301](../../../nccl/src/nccl.h.in#L275)，Scalable 见 [nccl.h.in:365](../../../nccl/src/nccl.h.in#L365)。两个完整用法分别在[单进程示例](../../examples/single_process_allreduce.cu#L73)和[MPI 示例](../../examples/mpi_allreduce.cu#L82)。
 
 ## 2. 概览图：少量 API 怎样展开成整套准备工作
 
@@ -129,7 +129,7 @@ NCCL：接手成员交换、拓扑与资源准备
 
 **Proxy** 在 CPU 侧代办连接资源服务，并为部分传输推进网络请求。连接信息准备好后，GPU 和 proxy 才能按各自职责使用它。
 
-[第 06 章](../06-topology.md)展开从硬件图到邻接关系的过程，[第 07 章](../07-transports.md)展开从邻接关系到可访问资源的过程。
+[第 06 章](../../06-topology.md)展开从硬件图到邻接关系的过程，[第 07 章](../../07-transports.md)展开从邻接关系到可访问资源的过程。
 
 **图搜索完成后，还要经过一次全局协调，才能形成所有 rank 一致的 Ring/Tree。** 普通新建 communicator 的主要交接是：
 
@@ -151,7 +151,7 @@ NCCL：接手成员交换、拓扑与资源准备
 
 **Work FIFO** 保存后续提交的设备工作描述。初始化准备好这块存储，每次 collective 的 planner 再填入当前任务的地址、范围和执行参数。
 
-完成本分支要求的准备与协调后，`ncclCommInitRankFunc` 发布 `initState=ncclSuccess`。后续 Host 与 Device 如何使用这些对象，分别见[第 02 章](../02-host-execution.md)和[第 03 章](../03-device-execution.md)。
+完成本分支要求的准备与协调后，`ncclCommInitRankFunc` 发布 `initState=ncclSuccess`。后续 Host 与 Device 如何使用这些对象，分别见[第 02 章](../../02-host-execution.md)和[第 03 章](../../03-device-execution.md)。
 
 ## 5. 哪些工作在初始化完成，哪些留给首次通信
 
@@ -193,15 +193,15 @@ r5 的进程只看到 GPU B1，因而选择 device 0；应用交给它 `nranks=8
 
 | 路径与符号 | 本次阅读重点 |
 |---|---|
-| [init.cc:2973 · `ncclCommInitAll`](../../nccl/src/init.cc#L2973) | 3016～3025 行生成 ID、逐卡选设备、在 group 中调用共同入口 |
-| [init.cc:2851 · `ncclCommInitRankDev`](../../nccl/src/init.cc#L2851) | 创建 comm、复制 ID、提交 init job |
-| [init.cc:2105 · `ncclCommInitRankFunc`](../../nccl/src/init.cc#L2105) | 2190 行进入 bootstrap，2196 行进入资源准备，2207 行发布成功 |
-| [bootstrap.cc:754 · `bootstrapInit`](../../nccl/src/bootstrap.cc#L754) | 会合、控制连接和联系地址交换 |
-| [init.cc:1163 · `initTransportsRank`](../../nccl/src/init.cc#L1163) | 1236～1238 行收齐 peerInfo，1381 行进入拓扑，1414 行开始图搜索，1531～1733 行协调并拼接布局，1811 行决定连接策略 |
-| [search.cc:1151 · `ncclTopoCompute`](../../nccl/src/graph/search.cc#L1151) | 硬件路径怎样变成局部 Ring/Tree 图；[connect.cc:20、380](../../nccl/src/graph/connect.cc#L20) 是 Preset/Postset |
-| [init.cc:712 · `devCommSetup`](../../nccl/src/init.cc#L712) | 主机状态怎样变成设备 comm、channel 和描述存储；调用处在 1952 行 |
-| [generic.cc:14、49 · Ring/Tree transport connect](../../nccl/src/transport/generic.cc#L14) | 读取逻辑邻居，登记并用 `ncclTransportP2pSetup` 完成实际连接 |
-| [group.cc:824–828 · 首轮连接 job](../../nccl/src/group.cc#L824) | 结合 [enqueue.cc:572](../../nccl/src/enqueue/enqueue.cc#L572)，追踪需求产生与连接完成 |
+| [init.cc:2973 · `ncclCommInitAll`](../../../nccl/src/init.cc#L2973) | 3016～3025 行生成 ID、逐卡选设备、在 group 中调用共同入口 |
+| [init.cc:2851 · `ncclCommInitRankDev`](../../../nccl/src/init.cc#L2851) | 创建 comm、复制 ID、提交 init job |
+| [init.cc:2105 · `ncclCommInitRankFunc`](../../../nccl/src/init.cc#L2105) | 2190 行进入 bootstrap，2196 行进入资源准备，2207 行发布成功 |
+| [bootstrap.cc:754 · `bootstrapInit`](../../../nccl/src/bootstrap.cc#L754) | 会合、控制连接和联系地址交换 |
+| [init.cc:1163 · `initTransportsRank`](../../../nccl/src/init.cc#L1163) | 1236～1238 行收齐 peerInfo，1381 行进入拓扑，1414 行开始图搜索，1531～1733 行协调并拼接布局，1811 行决定连接策略 |
+| [search.cc:1151 · `ncclTopoCompute`](../../../nccl/src/graph/search.cc#L1151) | 硬件路径怎样变成局部 Ring/Tree 图；[connect.cc:20、380](../../../nccl/src/graph/connect.cc#L20) 是 Preset/Postset |
+| [init.cc:712 · `devCommSetup`](../../../nccl/src/init.cc#L712) | 主机状态怎样变成设备 comm、channel 和描述存储；调用处在 1952 行 |
+| [generic.cc:14、49 · Ring/Tree transport connect](../../../nccl/src/transport/generic.cc#L14) | 读取逻辑邻居，登记并用 `ncclTransportP2pSetup` 完成实际连接 |
+| [group.cc:824–828 · 首轮连接 job](../../../nccl/src/group.cc#L824) | 结合 [enqueue.cc:572](../../../nccl/src/enqueue/enqueue.cc#L572)，追踪需求产生与连接完成 |
 
 **离线任务：给 r5 画一张四行交接表。** 每行写出“执行者 → 产物 → 下一消费者”：
 
@@ -212,6 +212,6 @@ r5 的进程只看到 GPU B1，因而选择 device 0；应用交给它 `nranks=8
 
 核对线索：依次追 `job->comm/commId`、`comm->bootstrap/peerInfo`、`channels[].ring/tree` 与连接信息，最后看 `group.cc:828` 对连接 job 的等待。初始化成功的发布点则是 `init.cc:2207`。
 
-这项阅读不需要 GPU。若有实验环境，可用已有应用分别记录初始化、首轮和预热后通信的耗时，再结合实际连接分支解释差异；本章未提供 GPU 实测数据。资源的正常收尾见[第 09 章](../09-memory-and-lifetime.md)。
+这项阅读不需要 GPU。若有实验环境，可用已有应用分别记录初始化、首轮和预热后通信的耗时，再结合实际连接分支解释差异；本章未提供 GPU 实测数据。资源的正常收尾见[第 09 章](../../09-memory-and-lifetime.md)。
 
-下一章：[06｜Topology：从硬件路径到 channel 邻接](../06-topology.md)。
+下一章：[06｜Topology：从硬件路径到 channel 邻接](../../06-topology.md)。

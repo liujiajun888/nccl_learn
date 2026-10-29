@@ -1,6 +1,6 @@
 # CollNet：通过集合网络完成跨节点通信
 
-[返回教程主页](../README.md) · [相关：NVLS](nvls.md) · [相关：MNNVL](mnnvl.md)
+[返回教程主页](../../README.md) · [相关：NVLS](nvls.md) · [相关：MNNVL](mnnvl.md)
 
 **CollNet 把节点内的数据组织与节点间的集合通信分开：GPU 负责本地归约和分发，网络插件负责节点间的集合操作。** CollNetDirect 和 CollNetChain 是这套机制的两种算法，主要区别在于节点内 GPU 怎样交换数据。
 
@@ -147,11 +147,11 @@ Direct 更容易利用高带宽节点内互连与多个网络出口；Chain 的�
 
 | 阅读目标 | 入口 |
 |---|---|
-| 集合网络插件契约 | [src/include/plugin/net/net_v12.h:147](../../nccl/src/include/plugin/net/net_v12.h#L147)，`ncclCollNet_v12_t` |
-| Direct 的连接关系 | [src/graph/connect.cc:178](../../nccl/src/graph/connect.cc#L178)，`connectCollNet` |
-| Direct 的设备数据流 | [src/device/all_reduce.h:248](../../nccl/src/device/all_reduce.h#L248) |
-| Chain 的设备数据流 | [src/device/all_reduce.h:638](../../nccl/src/device/all_reduce.h#L638) |
-| CPU proxy 调用网络 AllReduce | [src/transport/coll_net.cc:815](../../nccl/src/transport/coll_net.cc#L815)，`collNetIallreduce` |
-| 可用 collective 与调优约束 | [src/device/generate.py:104](../../nccl/src/device/generate.py#L104)、[src/tuning/collnet.cc:11](../../nccl/src/tuning/collnet.cc#L11) |
+| 集合网络插件契约 | [src/include/plugin/net/net_v12.h:147](../../../nccl/src/include/plugin/net/net_v12.h#L147)，`ncclCollNet_v12_t` |
+| Direct 的连接关系 | [src/graph/connect.cc:178](../../../nccl/src/graph/connect.cc#L178)，`connectCollNet` |
+| Direct 的设备数据流 | [src/device/all_reduce.h:248](../../../nccl/src/device/all_reduce.h#L248) |
+| Chain 的设备数据流 | [src/device/all_reduce.h:638](../../../nccl/src/device/all_reduce.h#L638) |
+| CPU proxy 调用网络 AllReduce | [src/transport/coll_net.cc:815](../../../nccl/src/transport/coll_net.cc#L815)，`collNetIallreduce` |
+| 可用 collective 与调优约束 | [src/device/generate.py:104](../../../nccl/src/device/generate.py#L104)、[src/tuning/collnet.cc:11](../../../nccl/src/tuning/collnet.cc#L11) |
 
 继续阅读：[NVLS](nvls.md) 解释 NVLink 域内的硬件归约；[MNNVL](mnnvl.md) 解释这个域如何跨越物理节点。

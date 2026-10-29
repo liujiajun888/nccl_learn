@@ -1,6 +1,6 @@
 # ncclCommInitRank 源码精读：从 API 入口到 device 端通信器
 
-这篇文档汇总已经讲解过的 communicator 初始化链路，按“做了什么、为什么需要、给下一步留下什么”组织，便于反复查阅。它是 [05｜Communicator](../05-communicator.md) 的逐段阅读补充，不是全部 NCCL API 的清单。
+这篇文档汇总已经讲解过的 communicator 初始化链路，按“做了什么、为什么需要、给下一步留下什么”组织，便于反复查阅。它是 [05｜Communicator](../../05-communicator.md) 的逐段阅读补充，不是全部 NCCL API 的清单。
 
 - 源码基线：NCCL **2.32.3**，提交 `12df1a11afad322be5a204a2db890161cbf8131d`。
 - 源码链接指向本地仓库；换版本后请按符号重新定位。
@@ -30,7 +30,7 @@
 15. [状态、错误与任务生命周期](#state)
 16. [完整主线小结、易混点与进阶阅读](#recap)
 
-**使用方式：**不建议一次通读全文。只想回顾整体流程，先读第 1、13、14、16 节；已经读过 [05｜Communicator](../05-communicator.md) 的读者可直接看第 14 节补齐后半段；需要完整研究普通初始化链路时，再按 1→16 分段阅读，每次只追一个阶段。复习时优先看 16.1–16.3，不要求逐行读完所有辅助函数。附录中的阅读路线见 [附录阅读指南](README.md)。
+**使用方式：**不建议一次通读全文。只想回顾整体流程，先读第 1、13、14、16 节；已经读过 [05｜Communicator](../../05-communicator.md) 的读者可直接看第 14 节补齐后半段；需要完整研究普通初始化链路时，再按 1→16 分段阅读，每次只追一个阶段。复习时优先看 16.1–16.3，不要求逐行读完所有辅助函数。附录中的阅读路线见 [附录阅读指南](../README.md)。
 
 <a id="map"></a>
 
@@ -40,7 +40,7 @@
 
 `ncclCommInitRank` 为当前 CUDA 设备创建一个 rank 的本地 communicator。一个逻辑通信组包含多个 ranks，每个 rank 持有自己的本地 `ncclComm_t`，不是所有进程共享同一个 C++ 对象。
 
-公开类型是一个不透明指针，见 [nccl.h.in:35–41](../../nccl/src/nccl.h.in#L35-L41)：
+公开类型是一个不透明指针，见 [nccl.h.in:35–41](../../../nccl/src/nccl.h.in#L35-L41)：
 
 ```cpp
 typedef struct ncclComm* ncclComm_t;
@@ -101,7 +101,7 @@ ncclCommInitRank                         公开 API
 
 ### 2.1 ncclCommInitRank 的薄包装
 
-源码：[init.cc:2945–2969](../../nccl/src/init.cc#L2945-L2969)。省略日志和错误处理后：
+源码：[init.cc:2945–2969](../../../nccl/src/init.cc#L2945-L2969)。省略日志和错误处理后：
 
 ```cpp
 ncclInitEnv();
@@ -121,7 +121,7 @@ ncclGroupEndInternal();
 
 ### 2.2 NCCL_API 宏不是函数调用
 
-源码中的 `NCCL_API(...)` 用于统一声明导出的函数，见 [core.h:16–36](../../nccl/src/include/core.h#L16-L36)。它处理 C 链接和平台导出规则；Linux 的 `PROFAPI` 分支还生成弱符号与 `pnccl*` 别名，用于插桩包装。
+源码中的 `NCCL_API(...)` 用于统一声明导出的函数，见 [core.h:16–36](../../../nccl/src/include/core.h#L16-L36)。它处理 C 链接和平台导出规则；Linux 的 `PROFAPI` 分支还生成弱符号与 `pnccl*` 别名，用于插桩包装。
 
 它不会执行初始化，也不是把任务加入队列的宏。
 
@@ -129,7 +129,7 @@ ncclGroupEndInternal();
 
 ### 2.3 NCCL_CONFIG_INITIALIZER 是花括号初始化宏
 
-源码：[nccl.h.in:102–164](../../nccl/src/nccl.h.in#L102-L164)。
+源码：[nccl.h.in:102–164](../../../nccl/src/nccl.h.in#L102-L164)。
 
 ```cpp
 ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
@@ -146,13 +146,13 @@ ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
 
 为什么不简单全部置零？因为 0 可能本来就是某字段的有效值，例如 `blocking=0` 表示非阻塞，而不是“没有设置”。
 
-[parseCommConfig](../../nccl/src/init.cc#L2558-L2624) 先初始化内部配置，再按 `size` 限制复制范围、检查 magic，并处理版本差异，随后校验字段、补默认值和应用环境覆盖。这是支持结构体演进与 ABI 兼容的设计。
+[parseCommConfig](../../../nccl/src/init.cc#L2558-L2624) 先初始化内部配置，再按 `size` 限制复制范围、检查 magic，并处理版本差异，随后校验字段、补默认值和应用环境覆盖。这是支持结构体演进与 ABI 兼容的设计。
 
 这里不必死记全部字段。先记住：`ncclConfig_t` 管 communicator 级别配置，不是每次 collective 使用的 `ncclCollConfig_t`。
 
 ### 2.4 ncclInit 是进程级公共准备，不是一个 rank 的完整初始化
 
-源码：[init.cc:159–198](../../nccl/src/init.cc#L159-L198)。
+源码：[init.cc:159–198](../../../nccl/src/init.cc#L159-L198)。
 
 ```cpp
 static ncclResult_t ncclInit() {
@@ -178,7 +178,7 @@ static ncclResult_t ncclInit() {
 
 ## 3. ncclCommInitRankDev：创建对象并封装任务
 
-源码：[init.cc:2851–2943](../../nccl/src/init.cc#L2851-L2943)。
+源码：[init.cc:2851–2943](../../../nccl/src/init.cc#L2851-L2943)。
 
 ### 3.1 前置检查与运行时准备
 
@@ -192,7 +192,7 @@ static ncclResult_t ncclInit() {
 ncclCalloc(&comm, 1);
 ```
 
-这不是直接调用 libc 的 `calloc`。宏会转到 `ncclCallocDebug`，见 [alloc.h:172–210](../../nccl/src/include/alloc.h#L172-L210)：
+这不是直接调用 libc 的 `calloc`。宏会转到 `ncclCallocDebug`，见 [alloc.h:172–210](../../../nccl/src/include/alloc.h#L172-L210)：
 
 ```text
 ncclCalloc(&comm, 1)
@@ -233,7 +233,7 @@ comm->initState = ncclInProgress;
 | `funcName` | 日志中保留原始公开 API 名称 |
 | `parent`、`color/key`、`isGrow` 等 | 派生 communicator 路径的附加信息 |
 
-复制 ID 的原因在 [2903–2910 行](../../nccl/src/init.cc#L2903-L2910) 的注释里很明确：
+复制 ID 的原因在 [2903–2910 行](../../../nccl/src/init.cc#L2903-L2910) 的注释里很明确：
 
 - 任务可能延迟执行，不能依赖调用者临时参数一直有效。
 - `ncclUniqueId` 是字节包装，和内部 bootstrap handle 的对齐要求不同；复制到分配的内存中解决对齐问题。
@@ -250,7 +250,7 @@ ncclAsyncLaunch((struct ncclAsyncJob*)job,
                 comm);
 ```
 
-执行函数是 `ncclCommInitRankFunc`，清理函数是 `ncclCommInitJobFree`。后者释放任务的 ID 副本并删除任务对象，见 [init.cc:2845–2849](../../nccl/src/init.cc#L2845-L2849)。
+执行函数是 `ncclCommInitRankFunc`，清理函数是 `ncclCommInitJobFree`。后者释放任务的 ID 副本并删除任务对象，见 [init.cc:2845–2849](../../../nccl/src/init.cc#L2845-L2849)。
 
 若启用入队重构，则改走 `ncclMgmtTaskEnqueue`。提交前失败与提交后任务清理的责任不同，`launchedJob` 用于区分这些路径，避免把已经交给调度器的任务再由提交方直接清理。
 
@@ -262,7 +262,7 @@ ncclAsyncLaunch((struct ncclAsyncJob*)job,
 
 ### 4.1 默认队列属于调用线程
 
-源码：[group.cc:28–74](../../nccl/src/group.cc#L28-L74)。
+源码：[group.cc:28–74](../../../nccl/src/group.cc#L28-L74)。
 
 ```cpp
 thread_local struct ncclIntruQueue<
@@ -279,7 +279,7 @@ thread_local struct ncclIntruQueue<
 
 Group 支持嵌套。`ncclGroupStartInternal` 增加线程局部深度，`ncclGroupEndInternal` 减少深度；仍在嵌套层内就不提交。
 
-最外层结束时，见 [group.cc:1061–1093](../../nccl/src/group.cc#L1061-L1093)：
+最外层结束时，见 [group.cc:1061–1093](../../../nccl/src/group.cc#L1061-L1093)：
 
 ```cpp
 ncclIntruQueueTransfer(&groupJob->asyncJobs, &ncclAsyncJobs);
@@ -301,12 +301,12 @@ ncclGroupEndInternal
 
 ### 4.3 是否另起线程，由两层决策共同决定
 
-第一层看有效的 `blocking` 配置，见 [group.cc:1102–1142](../../nccl/src/group.cc#L1102-L1142)：
+第一层看有效的 `blocking` 配置，见 [group.cc:1102–1142](../../../nccl/src/group.cc#L1102-L1142)：
 
 - `blocking=1`：调用线程直接调度 Group，并等待完成。
 - `blocking=0`：另起 Group 后台线程，允许调用线程返回 `ncclInProgress`。
 
-第二层看本次任务队列有几个任务，见 [asyncJobLaunch](../../nccl/src/group.cc#L609-L669)：
+第二层看本次任务队列有几个任务，见 [asyncJobLaunch](../../../nccl/src/group.cc#L609-L669)：
 
 - 一个任务：直接在当前调度线程上执行 `ncclAsyncJobMain(job)`。
 - 多个任务：为每个任务创建 `std::thread`，调度线程检查状态并 join。
@@ -335,7 +335,7 @@ ncclMgmtTaskEnqueue → comm->mgmtTaskQueue
   → task->func(task)
 ```
 
-任务放到每个 comm 的管理任务队列；外层管理任务调度仍保留单任务直接执行的优化。参考 [mgmt_task_enq.cc](../../nccl/src/enqueue/mgmt_task_enq.cc#L11-L43) 和 [group.cc:304–328](../../nccl/src/group.cc#L304-L328)。
+任务放到每个 comm 的管理任务队列；外层管理任务调度仍保留单任务直接执行的优化。参考 [mgmt_task_enq.cc](../../../nccl/src/enqueue/mgmt_task_enq.cc#L11-L43) 和 [group.cc:304–328](../../../nccl/src/group.cc#L304-L328)。
 
 **本节小结：“延迟到 GroupEnd 执行”“另起线程”“API 提前返回”是三个不同概念，不能仅凭 Async 命名判断行为。**
 
@@ -343,7 +343,7 @@ ncclMgmtTaskEnqueue → comm->mgmtTaskQueue
 
 ## 5. ncclCommInitRankFunc：参数与 GPU 环境准备
 
-源码：[init.cc:2105–2134](../../nccl/src/init.cc#L2105-L2134)。
+源码：[init.cc:2105–2134](../../../nccl/src/init.cc#L2105-L2134)。
 
 ### 5.1 从通用任务恢复初始化参数
 
@@ -354,7 +354,7 @@ ncclComm_t comm = job->comm;
 int cudaDev = job->cudaDev;
 ```
 
-调度器统一接收 `ncclAsyncJob*`。具体初始化任务把 `base` 放在首成员，回调恢复具体类型以读取自己的参数，见 [任务结构](../../nccl/src/init.cc#L2008-L2027)。
+调度器统一接收 `ncclAsyncJob*`。具体初始化任务把 `base` 放在首成员，回调恢复具体类型以读取自己的参数，见 [任务结构](../../../nccl/src/init.cc#L2008-L2027)。
 
 这个转换不会复制任务，也不是重新创建 comm。通用调度框架无需理解每种任务的全部字段。
 
@@ -382,7 +382,7 @@ cudaArch = 100 * archMajor + 10 * archMinor;
 ncclInitKernelsForDevice(cudaArch, maxSharedMem, &maxLocalSizeBytes);
 ```
 
-实现见 [enqueue.cc:55–118](../../nccl/src/enqueue/enqueue.cc#L55-L118)，主要工作是：
+实现见 [enqueue.cc:55–118](../../../nccl/src/enqueue/enqueue.cc#L55-L118)，主要工作是：
 
 1. 遍历常规、对称内存 kernel 及相应 profiling 变体。
 2. 检查驱动版本要求，跳过不支持的 kernel。
@@ -410,7 +410,7 @@ NCCL 使用汇总的 `localSizeBytes` 作为设置依据，尽量避免后续 ke
 
 ## 6. commHash：为什么需要通信组的紧凑标识
 
-普通路径跳过 Split/Shrink/Grow 后，来到 [init.cc:2178–2183](../../nccl/src/init.cc#L2178-L2183)：
+普通路径跳过 Split/Shrink/Grow 后，来到 [init.cc:2178–2183](../../../nccl/src/init.cc#L2178-L2183)：
 
 ```cpp
 comm->commHash = commIdHash =
@@ -419,7 +419,7 @@ comm->commHash = commIdHash =
 
 ### 6.1 从 128 字节得到 64 位标识
 
-[getHash](../../nccl/src/include/bitops.h#L500-L543) 对输入字节做混合运算，得到 64 位值：
+[getHash](../../../nccl/src/include/bitops.h#L500-L543) 对输入字节做混合运算，得到 64 位值：
 
 - `comm->commHash` 长期保存在对象里，供其他模块使用。
 - `commIdHash` 是当前函数的局部变量，主要用于日志。
@@ -436,8 +436,8 @@ comm->commHash = commIdHash =
 较短的 hash 也比完整的 128 字节 ID 更方便携带、记录和比较。源码中的实际消费者包括：
 
 - 初始化日志：关联不同进程中属于同一组的记录。
-- [网络插件初始化](../../nccl/src/plugin/net.cc#L191-L195)：传入通信组标识和配置。
-- [Profiler 初始化](../../nccl/src/plugin/profiler.cc#L338-L342)：关联通信组的分析数据。
+- [网络插件初始化](../../../nccl/src/plugin/net.cc#L191-L195)：传入通信组标识和配置。
+- [Profiler 初始化](../../../nccl/src/plugin/profiler.cc#L338-L342)：关联通信组的分析数据。
 - GIN、RMA 等插件上下文初始化。
 
 这也解释了先 hash、后 `commAlloc` 的顺序：后者初始化插件时已经需要这个值。
@@ -459,7 +459,7 @@ hash 不是网络地址，也不能代替 unique ID；后面的 `bootstrapInit` 
 
 ## 7. commAlloc：为什么分配对象后还要初始化资源
 
-调用处：[init.cc:2182](../../nccl/src/init.cc#L2182)；实现：[init.cc:512–657](../../nccl/src/init.cc#L512-L657)。
+调用处：[init.cc:2182](../../../nccl/src/init.cc#L2182)；实现：[init.cc:512–657](../../../nccl/src/init.cc#L512-L657)。
 
 ```cpp
 commAlloc(comm, NULL, job->nranks, job->myrank);
@@ -483,13 +483,13 @@ commAlloc(comm, ...)：初始化字段、子对象和运行资源
 - `memPermanent`：管理随 comm 长期存在的内部数据。
 - `memScoped`：管理可按作用域集中回收的临时数据。
 
-它们是 NCCL 自有分配结构，非 CPU 调用栈、非 GPU 线程栈。集中分配、按生命周期回收能减少零散分配和逐个清理的负担。初始构造主要设置管理状态，见 [utils.h:235–277](../../nccl/src/include/utils.h#L235-L277)。
+它们是 NCCL 自有分配结构，非 CPU 调用栈、非 GPU 线程栈。集中分配、按生命周期回收能减少零散分配和逐个清理的负担。初始构造主要设置管理状态，见 [utils.h:235–277](../../../nccl/src/include/utils.h#L235-L277)。
 
 ### 7.3 sharedRes：内部 streams、events 与共享机制
 
 普通新建路径创建 `ncclSharedResources`，包含内部 `deviceStream/hostStream`、`launchEvent/scratchEvent` 等。
 
-[ncclStrongStreamConstruct](../../nccl/src/misc/strongstream.cc#L146-L154) 确实会创建 CUDA stream。`hostStream` 也不是 CPU 线程，只是 NCCL 内部 stream 的命名。
+[ncclStrongStreamConstruct](../../../nccl/src/misc/strongstream.cc#L146-L154) 确实会创建 CUDA stream。`hostStream` 也不是 CPU 线程，只是 NCCL 内部 stream 的命名。
 
 为什么需要内部 stream/event？资源准备和执行依赖管理不能只依赖用户后续传入的通信 stream；event 可以表达先后关系。
 
@@ -503,7 +503,7 @@ ncclRmaInit(comm);
 ncclGinInit(comm);
 ```
 
-它们准备后端及上下文。以 [ncclNetInit](../../nccl/src/plugin/net.cc#L357-L389) 为例，会检查插件状态和 `netName`，为 comm 选择网络实现。
+它们准备后端及上下文。以 [ncclNetInit](../../../nccl/src/plugin/net.cc#L357-L389) 为例，会检查插件状态和 `netName`，为 comm 选择网络实现。
 
 “选好后端、初始化上下文”不等于“已经与所有 peers 建好数据连接”。后续知道对端连接信息后，才调用相应后端的连接能力。
 
@@ -542,7 +542,7 @@ CUDA memory pool 的释放阈值设得很高，是为了保留池中的内存供
 
 ### 8.1 为什么需要 bootstrap？
 
-调用处：[init.cc:2190](../../nccl/src/init.cc#L2190)。
+调用处：[init.cc:2190](../../../nccl/src/init.cc#L2190)。
 
 ```cpp
 bootstrapInit(job->nId, (struct ncclBootstrapHandle*)job->commId,
@@ -561,7 +561,7 @@ bootstrap 利用基础网络能力建立最初的控制通道，再帮助完整�
 
 ### 8.2 unique ID 不是纯随机编号
 
-内部 handle 见 [bootstrap.h:14–20](../../nccl/src/include/bootstrap.h#L14-L20)：
+内部 handle 见 [bootstrap.h:14–20](../../../nccl/src/include/bootstrap.h#L14-L20)：
 
 ```cpp
 struct ncclBootstrapHandle {
@@ -577,7 +577,7 @@ struct ncclBootstrapHandle {
 | `magic` | Socket 握手时检查是否匹配预期实例 |
 | `nRanks` | Grow 使用的原有 rank 数；普通初始化时为 0 |
 
-[ncclGetUniqueId](../../nccl/src/init.cc#L209-L222) 将内部 handle 复制进清零的公开 128 字节包装中。应用只应原样分发 ID，不依赖这个内部布局。
+[ncclGetUniqueId](../../../nccl/src/init.cc#L209-L222) 将内部 handle 复制进清零的公开 128 字节包装中。应用只应原样分发 ID，不依赖这个内部布局。
 
 区别三个 magic/hash：配置结构体的 `NCCL_API_MAGIC` 检查初始化格式；handle 的 `magic` 参与连接匹配；`commHash` 是完整 ID 的紧凑摘要。不要因名字接近就视为同一字段。
 
@@ -596,13 +596,13 @@ ncclGetUniqueId
   → 把 handle 包装为 unique ID 返回给应用
 ```
 
-实现见 [bootstrap.cc:408–463](../../nccl/src/bootstrap.cc#L408-L463)。线程名是 `NCCL BootstrapR`，创建后 detach。
+实现见 [bootstrap.cc:408–463](../../../nccl/src/bootstrap.cc#L408-L463)。线程名是 `NCCL BootstrapR`，创建后 detach。
 
 为什么另起线程？生成 ID 的调用必须返回，应用才能继续分发 ID、创建 ranks；root 同时需要等待各 rank 报到。
 
 root 是服务角色，不等同于 rank 0。常见程序由 rank 0 所在进程调用 `ncclGetUniqueId`，但默认源码不强制这一对应。它是该进程中的线程，不是另外启动的进程。
 
-例外：设置 `NCCL_COMM_ID` 后走指定地址路径，本章主线假设不适用；`ncclCommInitRankDev` 会在 `myrank==0` 时创建对应 root，见 [init.cc:2912–2920](../../nccl/src/init.cc#L2912-L2920)。
+例外：设置 `NCCL_COMM_ID` 后走指定地址路径，本章主线假设不适用；`ncclCommInitRankDev` 会在 `myrank==0` 时创建对应 root，见 [init.cc:2912–2920](../../../nccl/src/init.cc#L2912-L2920)。
 
 **本节小结：unique ID 携带“到哪里报到”的信息；root 服务通常在生成 ID 的时候就已开始监听。**
 
@@ -610,7 +610,7 @@ root 是服务角色，不等同于 rank 0。常见程序由 rank 0 所在进程
 
 ## 9. bootstrapInit 前半段：报到、领邻居、连接成环
 
-源码：[bootstrap.cc:754–894](../../nccl/src/bootstrap.cc#L754-L894)。以下继续假设普通初始化、单 ID、默认 Socket 后端。
+源码：[bootstrap.cc:754–894](../../../nccl/src/bootstrap.cc#L754-L894)。以下继续假设普通初始化、单 ID、默认 Socket 后端。
 
 ### 9.1 创建 bootstrapState 并挂到 comm
 
@@ -628,7 +628,7 @@ comm->magic = state->magic = BOOTSTRAP_HANDLE(handles, 0)->magic;
 
 ### 9.2 每个 rank 准备两个监听入口
 
-创建位置：[799–830 行](../../nccl/src/bootstrap.cc#L799-L830)。
+创建位置：[799–830 行](../../../nccl/src/bootstrap.cc#L799-L830)。
 
 | 入口 | 谁来连接 | 用途与生命周期 |
 |---|---|---|
@@ -641,15 +641,15 @@ comm->magic = state->magic = BOOTSTRAP_HANDLE(handles, 0)->magic;
 
 ### 9.3 向 root 报到
 
-每个 rank 的 `extInfo` 携带 rank、总 rank 数、环监听地址和 root 回传地址等，结构见 [bootstrap.cc:267–275](../../nccl/src/bootstrap.cc#L267-L275)。
+每个 rank 的 `extInfo` 携带 rank、总 rank 数、环监听地址和 root 回传地址等，结构见 [bootstrap.cc:267–275](../../../nccl/src/bootstrap.cc#L267-L275)。
 
-[sendToRoot](../../nccl/src/bootstrap.cc#L737-L748) 使用 ID 中的 root 地址：
+[sendToRoot](../../../nccl/src/bootstrap.cc#L737-L748) 使用 ID 中的 root 地址：
 
 ```text
 连接 root → 发送 extInfo → 关闭本次报到连接
 ```
 
-单 ID 普通路径下所有 ranks 联系同一个 root。人数较多时会按 rank 错开报到时间，避免瞬间大量连接压到 root；这是 [833–842 行](../../nccl/src/bootstrap.cc#L833-L842) 的 stagger 延迟。
+单 ID 普通路径下所有 ranks 联系同一个 root。人数较多时会按 rank 错开报到时间，避免瞬间大量连接压到 root；这是 [833–842 行](../../../nccl/src/bootstrap.cc#L833-L842) 的 stagger 延迟。
 
 ### 9.4 root 只分发后继信息，不发送完整地址表
 
@@ -662,15 +662,15 @@ root 给 rank 2：rank 3 的环地址
 root 给 rank 3：rank 0 的环地址
 ```
 
-root 通过各 rank 提供的回传监听地址发送这些信息，而不是复用已经关闭的报到连接。本地接收到 `nextPeer` 后关闭临时回传 socket 和 `listenSockRoot`，见 [869–876 行](../../nccl/src/bootstrap.cc#L869-L876)。
+root 通过各 rank 提供的回传监听地址发送这些信息，而不是复用已经关闭的报到连接。本地接收到 `nextPeer` 后关闭临时回传 socket 和 `listenSockRoot`，见 [869–876 行](../../../nccl/src/bootstrap.cc#L869-L876)。
 
 为什么只给邻居？每个 rank 得到一份地址就足以形成连通环；不必由 root 给 N 个 ranks 分别复制完整 N 份地址表，后续信息可沿环分布式传播。
 
-root 也不是等所有 ranks 报到后才开始回复。相邻信息齐备就可提前发送，最后补发剩余信息，见 [bootstrapRoot:354–388](../../nccl/src/bootstrap.cc#L354-L388)。
+root 也不是等所有 ranks 报到后才开始回复。相邻信息齐备就可提前发送，最后补发剩余信息，见 [bootstrapRoot:354–388](../../../nccl/src/bootstrap.cc#L354-L388)。
 
 ### 9.5 主动连接后继，接收前驱连接
 
-调用位置：[885–894 行](../../nccl/src/bootstrap.cc#L885-L894)；默认分支调用 [socketRingConnect](../../nccl/src/bootstrap.cc#L687-L700)。
+调用位置：[885–894 行](../../../nccl/src/bootstrap.cc#L885-L894)；默认分支调用 [socketRingConnect](../../../nccl/src/bootstrap.cc#L687-L700)。
 
 ```text
 主动连接下一个 rank → send 连接
@@ -701,7 +701,7 @@ root 完成分发后清理资源并退出，后续环交换不需要 root 持续
 
 ## 10. bootstrapInit 后半段：服务入口、全组信息交换与 proxy 状态
 
-源码：[bootstrap.cc:896–964](../../nccl/src/bootstrap.cc#L896-L964)。本节继续普通新建、单 ID、默认 Socket bootstrap 主线，UDS 的具体机制以 Linux 实现为例。
+源码：[bootstrap.cc:896–964](../../../nccl/src/bootstrap.cc#L896-L964)。本节继续普通新建、单 ID、默认 Socket bootstrap 主线，UDS 的具体机制以 Linux 实现为例。
 
 ```text
 创建本 rank 的 proxy、bootstrap P2P 入口与 UDS 标识
@@ -727,7 +727,7 @@ root 完成分发后清理资源并退出，后续环交换不需要 root 持续
 
 ### 10.2 每个 rank 先把自己的地址填入自己的槽位
 
-先看 [898–902 行](../../nccl/src/bootstrap.cc#L898-L902)：
+先看 [898–902 行](../../../nccl/src/bootstrap.cc#L898-L902)：
 
 ```cpp
 ncclCalloc(&state->peerProxyAddresses, nranks);
@@ -747,7 +747,7 @@ peerProxyAddresses = [ 未知, 未知, rank 2 的 proxy 地址, 未知 ]
 
 为什么现在就分配完整数组？下一步需要收集其余 ranks 的地址，最终每个 rank 都会保留一份完整联系表。分配数组不意味着在本进程创建其他 ranks 的监听服务。
 
-[907–913 行](../../nccl/src/bootstrap.cc#L907-L913) 对 bootstrap P2P 入口做同样的事：
+[907–913 行](../../../nccl/src/bootstrap.cc#L907-L913) 对 bootstrap P2P 入口做同样的事：
 
 ```cpp
 createListenSocket(comm, comm->magic,
@@ -759,18 +759,18 @@ memcpy(state->peerP2pAddresses + rank, &peerSocketAddress,
        sizeof(union ncclSocketAddress));
 ```
 
-后续 [socketConnect](../../nccl/src/bootstrap.cc#L1067-L1077) 从 `peerP2pAddresses[peer]` 查到目标地址，再连接指定 peer。知道对端地址不代表现在就建立连接；本段没有直接创建一张全连接网络。
+后续 [socketConnect](../../../nccl/src/bootstrap.cc#L1067-L1077) 从 `peerP2pAddresses[peer]` 查到目标地址，再连接指定 peer。知道对端地址不代表现在就建立连接；本段没有直接创建一张全连接网络。
 
 ### 10.3 UDS：先生成标识，稍后才创建 IPC socket
 
-[904–905 行](../../nccl/src/bootstrap.cc#L904-L905)：
+[904–905 行](../../../nccl/src/bootstrap.cc#L904-L905)：
 
 ```cpp
 ncclCalloc(&state->peerProxyAddressesUDS, nranks);
 getUDS(state->peerProxyAddressesUDS + rank);
 ```
 
-不要根据函数名把 `getUDS` 理解为“取得一个已创建的 Socket”。[其实现](../../nccl/src/bootstrap.cc#L558-L563)只是：
+不要根据函数名把 `getUDS` 理解为“取得一个已创建的 Socket”。[其实现](../../../nccl/src/bootstrap.cc#L558-L563)只是：
 
 ```cpp
 uint64_t randId;
@@ -780,15 +780,15 @@ getRandomData(&randId, sizeof(randId));
 
 这里生成一个 64 位标识，之后结合 rank 构造 IPC endpoint 名称。它不是文件描述符、显存地址或 `commHash`，也不是 TCP 的 IP/端口。
 
-UDS 即 Unix Domain Socket，用于同机进程间通信。为什么 proxy 还需要它？资源共享有时需要跨进程传递文件描述符，Linux 实现使用 UDS 的 `SCM_RIGHTS` 机制完成这件事，见 [linux_ipcsocket.cc:205–214](../../nccl/src/os/linux_ipcsocket.cc#L205-L214)。
+UDS 即 Unix Domain Socket，用于同机进程间通信。为什么 proxy 还需要它？资源共享有时需要跨进程传递文件描述符，Linux 实现使用 UDS 的 `SCM_RIGHTS` 机制完成这件事，见 [linux_ipcsocket.cc:205–214](../../../nccl/src/os/linux_ipcsocket.cc#L205-L214)。
 
 把“我的 fd 是 5”通过 TCP 发送给另一个进程没有这种效果：对方进程中的 fd 5 可能指向完全不同的对象。UDS 传递的是对相应内核资源的访问引用，接收端得到的 fd 数值不必相同。交换到远端机器的 UDS 标识也不意味着可以跨机器使用 UDS。
 
-真正创建、绑定本 rank IPC socket 的动作在后面的 `ncclProxyInit` 中，调用的 Linux 实现见 [ncclIpcSocketInit](../../nccl/src/os/linux_ipcsocket.cc#L28-L84)。
+真正创建、绑定本 rank IPC socket 的动作在后面的 `ncclProxyInit` 中，调用的 Linux 实现见 [ncclIpcSocketInit](../../../nccl/src/os/linux_ipcsocket.cc#L28-L84)。
 
 ### 10.4 RAS：复用同一轮信息交换，并保留集体参与
 
-[915–932 行](../../nccl/src/bootstrap.cc#L915-L932)在 RAS 启用时准备本 rank 的记录，包括地址、PID、CUDA/NVML 设备编号、主机 hash 和进程 hash。
+[915–932 行](../../../nccl/src/bootstrap.cc#L915-L932)在 RAS 启用时准备本 rank 的记录，包括地址、PID、CUDA/NVML 设备编号、主机 hash 和进程 hash。
 
 RAS 用于可靠性、可用性和可维护性相关的监控诊断。既然即将收集全组信息，就可以把 RAS 记录一起带上，复用这一轮交换。
 
@@ -807,7 +807,7 @@ RAS 用于可靠性、可用性和可维护性相关的监控诊断。既然即�
 
 ### 10.5 ringAllInfo：打包、AllGather、拆包
 
-调用见 [935–937 行](../../nccl/src/bootstrap.cc#L935-L937)，实现见 [701–735 行](../../nccl/src/bootstrap.cc#L701-L735)。以下按成功路径看数据如何流动。
+调用见 [935–937 行](../../../nccl/src/bootstrap.cc#L935-L937)，实现见 [701–735 行](../../../nccl/src/bootstrap.cc#L701-L735)。以下按成功路径看数据如何流动。
 
 **第一步：打包自己的记录。** 临时记录类型为：
 
@@ -849,7 +849,7 @@ bootstrapAllGather(state, ringData, sizeof(struct bootstrapRingData));
 
 ### 10.6 socketRingAllGather：当前实现沿环双向传播
 
-[bootstrapAllGather](../../nccl/src/bootstrap.cc#L1413-L1438) 根据 `NCCL_OOB_NET_ENABLE` 选择 Net 或 Socket 后端。本节继续默认的 [socketRingAllGather](../../nccl/src/bootstrap.cc#L1363-L1412)，不要把它的具体轮数直接套到其他后端或版本。
+[bootstrapAllGather](../../../nccl/src/bootstrap.cc#L1413-L1438) 根据 `NCCL_OOB_NET_ENABLE` 选择 Net 或 Socket 后端。本节继续默认的 [socketRingAllGather](../../../nccl/src/bootstrap.cc#L1363-L1412)，不要把它的具体轮数直接套到其他后端或版本。
 
 第 9 节的箭头表示邻居连接关系。TCP Socket 是全双工的，名为 `send` 的连接也能接收，名为 `recv` 的连接也能发送；本实现沿已有相邻连接的两个方向传播记录，并未因此再创建一套环连接。
 
@@ -898,7 +898,7 @@ bool isFinalUnidirectional =
 
 ### 10.7 ncclProxyInit 不等于启动 proxy 服务线程
 
-[941–942 行](../../nccl/src/bootstrap.cc#L940-L942)把准备好的资源交给：
+[941–942 行](../../../nccl/src/bootstrap.cc#L940-L942)把准备好的资源交给：
 
 ```cpp
 ncclProxyInit(comm, proxySocket,
@@ -906,13 +906,13 @@ ncclProxyInit(comm, proxySocket,
               state->peerProxyAddressesUDS);
 ```
 
-其[实际实现](../../nccl/src/proxy.cc#L2111-L2128)主要是：
+其[实际实现](../../../nccl/src/proxy.cc#L2111-L2128)主要是：
 
 1. 创建 `comm->sharedRes->proxyState`，让 `comm->proxyState` 指向它，并设置引用计数。
 2. 保存 `listenSock`、`peerAddresses`、`peerAddressesUDS`。这里保存原有指针，不是重新复制整张表。
 3. 使用本 rank 的 UDS 标识调用 `ncclIpcSocketInit`，创建本地 IPC socket。
 
-**这一阶段没有启动 proxy 服务线程。** 真正创建线程的是后面的 [ncclProxyCreate](../../nccl/src/proxy.cc#L2130-L2165)，普通路径从 [initTransportsRank](../../nccl/src/init.cc#L1775-L1786) 调用，启动 `ncclProxyService` 和 `ncclProxyServiceUDS`。
+**这一阶段没有启动 proxy 服务线程。** 真正创建线程的是后面的 [ncclProxyCreate](../../../nccl/src/proxy.cc#L2130-L2165)，普通路径从 [initTransportsRank](../../../nccl/src/init.cc#L1775-L1786) 调用，启动 `ncclProxyService` 和 `ncclProxyServiceUDS`。
 
 为什么分两步？服务线程工作需要本地 rank 数量、channel 数量、缓冲参数和后端上下文等信息，其中一部分在后面的初始化阶段才确定。
 
@@ -922,11 +922,11 @@ bootstrapInit：入口、地址表、proxyState、IPC socket
   → ncclProxyCreate：启动服务线程
 ```
 
-因此不能只根据附近的服务创建注释，把 `ncclProxyInit` 当成“服务线程已经开始运行”。资源生命周期也有分工：[bootstrapClose](../../nccl/src/bootstrap.cc#L1587-L1592) 关闭 bootstrap P2P 入口并释放其地址表，proxy 地址表由 [proxy 清理路径](../../nccl/src/proxy.cc#L2215-L2225) 释放。
+因此不能只根据附近的服务创建注释，把 `ncclProxyInit` 当成“服务线程已经开始运行”。资源生命周期也有分工：[bootstrapClose](../../../nccl/src/bootstrap.cc#L1587-L1592) 关闭 bootstrap P2P 入口并释放其地址表，proxy 地址表由 [proxy 清理路径](../../../nccl/src/proxy.cc#L2215-L2225) 释放。
 
 ### 10.8 返回前的 RAS 交接与阶段边界
 
-[944–964 行](../../nccl/src/bootstrap.cc#L944-L964)完成 RAS 信息交接、计时、日志和返回：
+[944–964 行](../../../nccl/src/bootstrap.cc#L944-L964)完成 RAS 信息交接、计时、日志和返回：
 
 - RAS 已启用且本地初始化允许继续时，尝试 `ncclRasAddRanks(rasRanks, nranks)`。
 - 成功后将局部指针 `rasRanks` 置空，由 RAS 接管；失败则记录日志，局部数组仍在退出路径释放。
@@ -947,7 +947,7 @@ bootstrapInit：入口、地址表、proxyState、IPC socket
 
 ## 11. initTransportsRank 首段：收集身份与能力，发布 peerInfo
 
-调用处：[init.cc:2196](../../nccl/src/init.cc#L2193-L2196)。本节深入 [1234–1239 行](../../nccl/src/init.cc#L1234-L1239) 的 `fillInfo → bootstrapAllGather → peerInfoValid`，尚未进入兼容性检查与拓扑搜索。
+调用处：[init.cc:2196](../../../nccl/src/init.cc#L2193-L2196)。本节深入 [1234–1239 行](../../../nccl/src/init.cc#L1234-L1239) 的 `fillInfo → bootstrapAllGather → peerInfoValid`，尚未进入兼容性检查与拓扑搜索。
 
 ### 11.1 为什么服务地址交换后，还要再次 AllGather？
 
@@ -989,7 +989,7 @@ peerInfo[nranks]：CollNet root 的内部预留槽位
 
 ### 11.3 fillInfo：设备身份不能只用 cudaDev
 
-实现：[init.cc:888–982](../../nccl/src/init.cc#L888-L982)；记录类型：[transport.h:46–74](../../nccl/src/include/transport.h#L46-L74)。
+实现：[init.cc:888–982](../../../nccl/src/init.cc#L888-L982)；记录类型：[transport.h:46–74](../../../nccl/src/include/transport.h#L46-L74)。
 
 `comm->peerInfo + rank` 等价于 `&comm->peerInfo[rank]`，所以 `fillInfo` 只填自己的一个槽位，不负责获取所有人的信息。
 
@@ -1010,7 +1010,7 @@ info->hostHash = getHostHash() + commHash;
 info->pidHash = getPidHash() + commHash;
 ```
 
-基础标识来源见 [utils.cc:85–187](../../nccl/src/misc/utils.cc#L85-L187)：
+基础标识来源见 [utils.cc:85–187](../../../nccl/src/misc/utils.cc#L85-L187)：
 
 - Linux 的 `getHostHash()` 默认对 hostname 与 boot ID 的组合求 hash，支持 `NCCL_HOSTID` 覆盖；读取 boot ID 失败时保留 hostname 回退。
 - Linux 的 `getPidHash()` 组合 PID 与 PID namespace 信息。不同容器都可能有 PID 1，不能只凭这个整数认定同进程。
@@ -1037,7 +1037,7 @@ info->shmDev = statbuf.st_dev;
 
 `shmDev` 是 `/dev/shm` 所在文件系统的设备标识，不是 CUDA 设备编号，也不是共享内存指针。
 
-为什么收集它？同机的两个容器可能具有不同的 `/dev/shm` 挂载。后续 [shmCanConnect](../../nccl/src/transport/shm.cc#L61-L82)先比较 `hostHash`，再比较 `shmDev`；不匹配时提前返回，可连接输出仍为 0。
+为什么收集它？同机的两个容器可能具有不同的 `/dev/shm` 挂载。后续 [shmCanConnect](../../../nccl/src/transport/shm.cc#L61-L82)先比较 `hostHash`，再比较 `shmDev`；不匹配时提前返回，可连接输出仍为 0。
 
 这里先记录共享内存环境的线索，后面 transport 再判断是否适用。通过这些检查仍不等于共享内存资源已经创建成功。
 
@@ -1073,7 +1073,7 @@ info->comm = comm;
 
 rank 0 和 rank 1 共享地址空间，可以使用彼此的 comm 指针。rank 2 收到这些指针值，不意味着获得远程对象访问能力，不能解引用它们。
 
-后面的 [1330–1338 行](../../nccl/src/init.cc#L1330-L1338)正是先确认 `hostHash` 和 `pidHash` 都匹配，再使用 `peerInfo[i].comm` 串联同进程对象。统一交换结构不代表其中每个字段对所有接收者都能直接使用。
+后面的 [1330–1338 行](../../../nccl/src/init.cc#L1330-L1338)正是先确认 `hostHash` 和 `pidHash` 都匹配，再使用 `peerInfo[i].comm` 串联同进程对象。统一交换结构不代表其中每个字段对所有接收者都能直接使用。
 
 ### 11.8 AllGather 与 peerInfoValid 的阶段边界
 
@@ -1091,7 +1091,7 @@ rank 3：[  —,  —,  —, P3 ]
 
 本地输入在 `[rank]`，`size` 是单条记录字节数；这是内部主机侧通信，不重新建环，也不是公开 `ncclAllGather`。每个 rank 都需要完整副本，以执行后面的本地决策。
 
-随后以 release 写入 `peerInfoValid=true`。例如 [RAS 诊断](../../nccl/src/ras/diagnostics.cc#L88-L94)会用 acquire 读取这个标志，未就绪时不使用表。配对同步保证读者看到发布前完成的记录写入。
+随后以 release 写入 `peerInfoValid=true`。例如 [RAS 诊断](../../../nccl/src/ras/diagnostics.cc#L88-L94)会用 acquire 读取这个标志，未就绪时不使用表。配对同步保证读者看到发布前完成的记录写入。
 
 它只表示“本进程里的这张表已可读”，不是跨机器内存屏障，也不是整个 communicator 初始化成功。版本与能力检查就在它后面，因此表可读甚至不等于兼容性检查已通过。
 
@@ -1101,11 +1101,11 @@ rank 3：[  —,  —,  —, P3 ]
 
 ## 12. 消费 peerInfo：兼容性、共同能力与同进程成员
 
-源码：[init.cc:1241–1379](../../nccl/src/init.cc#L1241-L1379)。本节从“收齐记录”推进到“据此作决策”，仍未开始硬件拓扑发现。
+源码：[init.cc:1241–1379](../../../nccl/src/init.cc#L1241-L1379)。本节从“收齐记录”推进到“据此作决策”，仍未开始硬件拓扑发现。
 
 ### 12.1 contiguousRanksPerHost 统计的是连续区间
 
-[1247–1270 行](../../nccl/src/init.cc#L1247-L1270)按 rank 顺序扫描 `hostHash`，用 `prevHostHash` 记录当前主机区间，用 `currentHostSize` 记录连续区间长度。
+[1247–1270 行](../../../nccl/src/init.cc#L1247-L1270)按 rank 顺序扫描 `hostHash`，用 `prevHostHash` 记录当前主机区间，用 `currentHostSize` 记录连续区间长度。
 
 ```text
 rank： 0  1  2  3  4  5
@@ -1118,11 +1118,11 @@ contiguousRanksPerHost = 2
 
 第一次区间结束时建立长度基准，后面区间与它比较；长度不一致时以 `INT_MAX` 表示不规则排列。
 
-为什么需要这个值？规则排列下可以按步长选取对应成员，例如 `0、2、4` 或 `1、3、5`。后续 [GIN rail 连接模式](../../nccl/src/gin/gin_host.cc#L138-L144)会使用这个步长。
+为什么需要这个值？规则排列下可以按步长选取对应成员，例如 `0、2、4` 或 `1、3、5`。后续 [GIN rail 连接模式](../../../nccl/src/gin/gin_host.cc#L138-L144)会使用这个步长。
 
 它不是任意主机的总 rank 数统计：`A B A B` 会形成四个长度为 1 的连续区间，而不是直接统计成两个各有 2 个 ranks 的主机集合。
 
-**源码边界：**[1258 行](../../nccl/src/init.cc#L1253-L1259)在发现中间区间长度不一致时执行 `break`，退出的是整个外层 `for`；版本检查、重复 GPU 检查和能力归并也在这个循环中，因此该分支会跳过当前及后续成员的这些处理。下面按循环能够完整扫描的正常路径解释，不将其描述为所有布局下一定完成全组检查。这里记录的是静态源码行为，尚未进行该分支的运行验证。
+**源码边界：**[1258 行](../../../nccl/src/init.cc#L1253-L1259)在发现中间区间长度不一致时执行 `break`，退出的是整个外层 `for`；版本检查、重复 GPU 检查和能力归并也在这个循环中，因此该分支会跳过当前及后续成员的这些处理。下面按循环能够完整扫描的正常路径解释，不将其描述为所有布局下一定完成全组检查。这里记录的是静态源码行为，尚未进行该分支的运行验证。
 
 ### 12.2 两种版本检查，处理强度不同
 
@@ -1131,13 +1131,13 @@ contiguousRanksPerHost = 2
 | `peerInfo[i].version` 与本 rank 的版本不同 | 设为 `ncclInvalidUsage`，转到失败路径 |
 | 版本号相同但 `gitVersionHash` 不同 | rank 0 输出提醒，本项检查不直接终止初始化 |
 
-版本检查见 [1273–1277 行](../../nccl/src/init.cc#L1273-L1277)，源码指纹检查见 [1304–1311 行](../../nccl/src/init.cc#L1304-L1311)。
+版本检查见 [1273–1277 行](../../../nccl/src/init.cc#L1273-L1277)，源码指纹检查见 [1304–1311 行](../../../nccl/src/init.cc#L1304-L1311)。
 
 为什么检查？后续 ranks 需要按共同的内部数据格式和协议协作，不能简单假定不同版本可以混用。相同发布版本也可能来自不同源码构建，额外指纹有助于暴露差异；由 rank 0 提醒可以减少重复日志。
 
 ### 12.3 重复设备：NVML 编号与 GPU UUID 的区别
 
-[1287–1296 行](../../nccl/src/init.cc#L1287-L1296)对每个 i 比较此前所有 `j < i`，不是只比较“别人是否与我重复”。
+[1287–1296 行](../../../nccl/src/init.cc#L1287-L1296)对每个 i 比较此前所有 `j < i`，不是只比较“别人是否与我重复”。
 
 简化条件：
 
@@ -1148,7 +1148,7 @@ contiguousRanksPerHost = 2
     → ncclInvalidUsage
 ```
 
-`NCCL_MULTI_RANK_GPU_ENABLE` 当前默认是 0，见 [init.cc:73](../../nccl/src/init.cc#L73)。这里表达的是默认禁止、可显式启用的配置约束，不是任何条件下都不允许多 rank 共用 GPU。
+`NCCL_MULTI_RANK_GPU_ENABLE` 当前默认是 0，见 [init.cc:73](../../../nccl/src/init.cc#L73)。这里表达的是默认禁止、可显式启用的配置约束，不是任何条件下都不允许多 rank 共用 GPU。
 
 还有两个不能混为一谈的判断：
 
@@ -1161,7 +1161,7 @@ MLOPart 的不同分区可以属于同一 NVML 设备，但具有不同 UUID。�
 
 ### 12.4 共同能力：AND、交集与最小值
 
-[1280–1302 行](../../nccl/src/init.cc#L1280-L1302)把各 rank 的记录归并成后续选择条件：
+[1280–1302 行](../../../nccl/src/init.cc#L1280-L1302)把各 rank 的记录归并成后续选择条件：
 
 | 信息 | 归并方式 | 设计目的 |
 |---|---|---|
@@ -1184,11 +1184,11 @@ rank 1：110
 
 为什么不是并集？某些路径要求参与者共同支持，不能因为自己支持就让其他成员走同一机制。这也不是把所有 GPU 的性能强行降到相同水平，而是为选择提供兼容性边界。
 
-这些结果是后续决策的输入，不是路径已经启用。例如 [1923–1932 行](../../nccl/src/init.cc#L1923-L1932)还会结合 cuMem GDR、MLOPart、跨 NIC 支持和 rank 排列决定 GIN/RMA 相关能力。
+这些结果是后续决策的输入，不是路径已经启用。例如 [1923–1932 行](../../../nccl/src/init.cc#L1923-L1932)还会结合 cuMem GDR、MLOPart、跨 NIC 支持和 rank 排列决定 GIN/RMA 相关能力。
 
 ### 12.5 MNNVL 检查与局部 nNodes 的命名陷阱
 
-[1316–1320 行](../../nccl/src/init.cc#L1316-L1320)在发现异机成员、配置允许且相关 P2P 条件满足时尝试 `ncclMnnvlCheck`；显式启用 MNNVL 的设置也可触发检查。
+[1316–1320 行](../../../nccl/src/init.cc#L1316-L1320)在发现异机成员、配置允许且相关 P2P 条件满足时尝试 `ncclMnnvlCheck`；显式启用 MNNVL 的设置也可触发检查。
 
 前面局部 `nNodes` 初始为 1，但更新方式是：
 
@@ -1199,7 +1199,7 @@ if (comm->peerInfo[i].hostHash != comm->peerInfo[rank].hostHash)
 
 这里没有按主机去重。两台机器各 4 ranks，完整扫描后本机视角会得到 5，而非 2。此处主要用 `nNodes > 1` 判断是否出现异机成员，不能当作最终精确节点数 `comm->nNodes`。
 
-[ncclMnnvlCheck](../../nccl/src/mnnvl.cc#L14-L94)检查 cuMem、Fabric handle 支持、Fabric 初始化状态，确定 NVLink domain/clique 成员，并试验 Fabric handle 的导出与导入。上一节采集的 `fabricInfo` 在这里被消费。
+[ncclMnnvlCheck](../../../nccl/src/mnnvl.cc#L14-L94)检查 cuMem、Fabric handle 支持、Fabric 初始化状态，确定 NVLink domain/clique 成员，并试验 Fabric handle 的导出与导入。上一节采集的 `fabricInfo` 在这里被消费。
 
 为什么此时检查？有些跨节点系统存在 NVLink Fabric，不能只凭主机不同就认定只能走传统网络。
 
@@ -1207,7 +1207,7 @@ if (comm->peerInfo[i].hostHash != comm->peerInfo[rank].hostHash)
 
 ### 12.6 同进程成员的三个编号
 
-[1322–1379 行](../../nccl/src/init.cc#L1322-L1379)用 `do { ... } while (0)` 包住一组局部逻辑；它只执行一次，不是重试循环。
+[1322–1379 行](../../../nccl/src/init.cc#L1322-L1379)用 `do { ... } while (0)` 包住一组局部逻辑；它只执行一次，不是重试循环。
 
 按全局 rank 递增扫描，确认 `hostHash` 与 `pidHash` 都匹配后，统计：
 
@@ -1247,20 +1247,20 @@ if (intraProcRank0 == rank && rank != i) {
 }
 ```
 
-单个构造者避免多个初始化任务同时修改同一条链。上述例子形成 `comm0 → comm2 → nullptr`。这是进程内对象链表，不是 bootstrap 环或算法 Ring；后续 [finalize/清理逻辑](../../nccl/src/init.cc#L3260-L3280)会沿它遍历。
+单个构造者避免多个初始化任务同时修改同一条链。上述例子形成 `comm0 → comm2 → nullptr`。这是进程内对象链表，不是 bootstrap 环或算法 Ring；后续 [finalize/清理逻辑](../../../nccl/src/init.cc#L3260-L3280)会沿它遍历。
 
-随后清零 `intraBarrierPhase`、`intraBarrierCounter`、`intraBarrierGate`。后续 [ncclCommIntraBarrierIn/Out](../../nccl/src/include/comm.h#L943-L976)通过共享的 `intraComm0` 计数与放行，供特定 Group launch 等主机侧协调使用。
+随后清零 `intraBarrierPhase`、`intraBarrierCounter`、`intraBarrierGate`。后续 [ncclCommIntraBarrierIn/Out](../../../nccl/src/include/comm.h#L943-L976)通过共享的 `intraComm0` 计数与放行，供特定 Group launch 等主机侧协调使用。
 
 这里仅准备状态，没有执行一次 barrier，更不代表 GPU 工作完成。
 
 ### 12.8 NVLS 注册路径还依赖进程组织方式
 
-[1342–1355 行](../../nccl/src/init.cc#L1342-L1355)更新 `nvlsRegSupport`：
+[1342–1355 行](../../../nccl/src/init.cc#L1342-L1355)更新 `nvlsRegSupport`：
 
 1. 初始为 1。
 2. 通信组中存在两个 ranks 属于同一进程时，先设为 0。
 3. MNNVL 已启用时，设为 0。
-4. 否则，显式开启 `NCCL_SINGLE_PROC_MEM_REG_ENABLE` 可设回 1；该参数默认关闭，见 [group.cc:680](../../nccl/src/group.cc#L680)。
+4. 否则，显式开启 `NCCL_SINGLE_PROC_MEM_REG_ENABLE` 可设回 1；该参数默认关闭，见 [group.cc:680](../../../nccl/src/group.cc#L680)。
 
 `nvlsRegSupport` 是 NVLS 相关注册路径的支持条件，不是 `nvlsSupport` 本身。设为 0 不代表整个 NCCL 无法通信，也不能直接推断 NVLS 算法完全不可用。
 
@@ -1270,7 +1270,7 @@ if (intraProcRank0 == rank && rank != i) {
 
 ## 13. 硬件拓扑与路径：建图、裁剪、重算和 CPU affinity
 
-主线：[init.cc:1381–1412](../../nccl/src/init.cc#L1381-L1412)。此前已知道成员身份和能力，现在要知道 GPU、CPU、NIC 怎样连接、哪些路径可用，为后续 Ring/Tree 规划提供输入。
+主线：[init.cc:1381–1412](../../../nccl/src/init.cc#L1381-L1412)。此前已知道成员身份和能力，现在要知道 GPU、CPU、NIC 怎样连接、哪些路径可用，为后续 Ring/Tree 规划提供输入。
 
 ### 13.1 硬件图与算法通信图不是同一个对象
 
@@ -1295,7 +1295,7 @@ ncclTopoPrint(comm->topo);
 
 ### 13.2 ncclTopoGetSystem：融合多个来源的硬件描述
 
-实现：[topo.cc:1989–2178](../../nccl/src/graph/topo.cc#L1989-L2178)。
+实现：[topo.cc:1989–2178](../../../nccl/src/graph/topo.cc#L1989-L2178)。
 
 ```text
 读取可选 XML 描述
@@ -1311,13 +1311,13 @@ XML 是统一的中间表示，用于融合外部描述、OS 探测、NVML 和�
 
 `NCCL_TOPO_DUMP_FILE` 则用于导出发现、合并后的 XML。`init.cc` 中的 dump 调用与实际设置 `comm->topo` 的调用分开；不能把 dump 文件当作随后裁剪完成、包含所有路径缓存的完整对象快照。
 
-[2026–2035 行](../../nccl/src/graph/topo.cc#L2026-L2035)通过本 rank 的 `busId` 调用 `ncclTopoFillGpu`，给节点填入 `keep`、`rank`、`gdr` 等属性。[ncclTopoFillGpu](../../nccl/src/graph/xml.cc#L1077-L1085)结合 OS 层 PCI 信息和 NVML 查询补充 GPU 描述。
+[2026–2035 行](../../../nccl/src/graph/topo.cc#L2026-L2035)通过本 rank 的 `busId` 调用 `ncclTopoFillGpu`，给节点填入 `keep`、`rank`、`gdr` 等属性。[ncclTopoFillGpu](../../../nccl/src/graph/xml.cc#L1077-L1085)结合 OS 层 PCI 信息和 NVML 查询补充 GPU 描述。
 
 为什么各 rank 主要探测自己负责的 GPU？各进程的设备可见性可能不同，局部探测后再合并，才能拼接分散的视图。网络设备则由 Net、CollNet、GIN、RMA 等相应插件提供列表和属性，使图反映后端实际可用的资源。
 
 ### 13.3 XML 融合：再次交换，但参与范围不同
 
-[2118–2156 行](../../nccl/src/graph/topo.cc#L2118-L2156)调用 `bootstrapIntraNodeAllGather`。普通路径用 `hostHash` 选出同机 ranks；MNNVL 路径按 clique 组织融合，范围不必局限于一台机器。
+[2118–2156 行](../../../nccl/src/graph/topo.cc#L2118-L2156)调用 `bootstrapIntraNodeAllGather`。普通路径用 `hostHash` 选出同机 ranks；MNNVL 路径按 clique 组织融合，范围不必局限于一台机器。
 
 ```text
 rank 0 提供 GPU 0 的局部描述
@@ -1329,13 +1329,13 @@ rank 2 提供 GPU 2 的局部描述
 
 这不是由某个 rank 探测整个集群所有交换机布线后广播。普通路径主要形成同机相关硬件视图，跨节点算法关系还要后续协调。
 
-XML 内部也有父子指针。[ncclTopoConvertXml](../../nccl/src/graph/xml.cc#L256-L272)在发送前把它们转换成相对偏移，接收后再恢复成本地指针；不能直接把其他进程的 XML 指针拿来遍历。
+XML 内部也有父子指针。[ncclTopoConvertXml](../../../nccl/src/graph/xml.cc#L256-L272)在发送前把它们转换成相对偏移，接收后再恢复成本地指针；不能直接把其他进程的 XML 指针拿来遍历。
 
-融合后由 [ncclTopoGetSystemFromXml](../../nccl/src/graph/topo.cc#L1057-L1088)创建节点、补充 NVLink/C2C/PCI 连接，处理部分硬件特例并整理成内部图。
+融合后由 [ncclTopoGetSystemFromXml](../../../nccl/src/graph/topo.cc#L1057-L1088)创建节点、补充 NVLink/C2C/PCI 连接，处理部分硬件特例并整理成内部图。
 
 ### 13.4 节点、边、路径三层表示
 
-定义见 [topo.h:46–183](../../nccl/src/graph/topo.h#L46-L183)：
+定义见 [topo.h:46–183](../../../nccl/src/graph/topo.h#L46-L183)：
 
 | 层次 | 关键内容 |
 |---|---|
@@ -1363,9 +1363,9 @@ GPU 1 ── PCIe switch ── CPU/NUMA 1
 
 ### 13.5 ncclTopoComputePaths：先算硬件路径，再结合策略修正
 
-实现：[paths.cc:754–898](../../nccl/src/graph/paths.cc#L754-L898)。先清除旧路径，围绕 CPU、GPU、DEV、网络端点、NVSwitch 等节点计算路径，再应用能力与配置约束。
+实现：[paths.cc:754–898](../../../nccl/src/graph/paths.cc#L754-L898)。先清除旧路径，围绕 CPU、GPU、DEV、网络端点、NVSwitch 等节点计算路径，再应用能力与配置约束。
 
-底层 [ncclTopoSetPaths](../../nccl/src/graph/paths.cc#L52-L147)采用广度优先式扩展，但并非仅按跳数寻找普通无权最短路。当前更新优先级为：
+底层 [ncclTopoSetPaths](../../../nccl/src/graph/paths.cc#L52-L147)采用广度优先式扩展，但并非仅按跳数寻找普通无权最短路。当前更新优先级为：
 
 1. 路径类别更优。
 2. 类别相同，带宽模型值更大。
@@ -1379,7 +1379,7 @@ float bw = std::min(path->bw, link->bw);
 
 串联路径受瓶颈链路约束。假设两段的模型值为 50 和 32，则路径值为 32。这些是由属性和规则得到的建模值，不是本阶段运行带宽测试得到的实测吞吐。
 
-常见路径类型见 [graph.h:120–158](../../nccl/src/include/graph.h#L120-L158)：
+常见路径类型见 [graph.h:120–158](../../../nccl/src/include/graph.h#L120-L158)：
 
 | 类型 | 含义 |
 |---|---|
@@ -1397,7 +1397,7 @@ float bw = std::min(path->bw, link->bw);
 
 ### 13.6 物理连通不等于直接路径可用
 
-[795–826 行](../../nccl/src/graph/paths.cc#L795-L826)检查 P2P 和 SHM：
+[795–826 行](../../../nccl/src/graph/paths.cc#L795-L826)检查 P2P 和 SHM：
 
 - 不允许或不能使用 GPU Direct P2P 时，将相关路径模型调整为经 CPU 中转。
 - 再调用 P2P/SHM transport 的 `canConnect`，结合实际能力与策略判断可用性。
@@ -1405,7 +1405,7 @@ float bw = std::min(path->bw, link->bw);
 
 “经 CPU”在这里表达主机侧中转，不表示 CPU 必须执行用户归约。`PATH_NET` 也不是把 rank 从 communicator 删除，而是不再将它当作可用本地 P2P/SHM 到达的同域 peer。
 
-[845–889 行](../../nccl/src/graph/paths.cc#L845-L889)还会根据 GDR 条件调整 GPU↔NIC 路径；在满足特定条件时考虑 PXN：
+[845–889 行](../../../nccl/src/graph/paths.cc#L845-L889)还会根据 GDR 条件调整 GPU↔NIC 路径；在满足特定条件时考虑 PXN：
 
 ```text
 本 GPU → NVLink 相邻 GPU → 更合适的 NIC
@@ -1415,7 +1415,7 @@ float bw = std::min(path->bw, link->bw);
 
 ### 13.7 ncclTopoTrimSystem：裁剪的是局部图，不是通信组
 
-实现：[paths.cc:900–945](../../nccl/src/graph/paths.cc#L900-L945)。根据 GPU 之间的路径类型划分 domain，保留当前 rank 所属 domain 的 GPU 节点；判断包含 `path.type < PATH_NET`。
+实现：[paths.cc:900–945](../../../nccl/src/graph/paths.cc#L900-L945)。根据 GPU 之间的路径类型划分 domain，保留当前 rank 所属 domain 的 GPU 节点；判断包含 `path.type < PATH_NET`。
 
 目的在于让本地规划只保留同域可达 GPU，需要经网络处理的其他成员不继续充当这个局部图中的同域 GPU。
 
@@ -1439,15 +1439,15 @@ TrimSystem：修改图并清除旧路径
 
 ### 13.8 SearchInit 与 CPU 类型：准备参数，不是执行算法搜索
 
-[ncclTopoSearchInit](../../nccl/src/graph/search.cc#L18-L53)计算 `system->maxBw` 和 `system->totalBw` 等带宽模型参数。`totalBw` 不是全机所有链路带宽之和；当前实现先计算各 DEV 的相关带宽值，再取最大值。
+[ncclTopoSearchInit](../../../nccl/src/graph/search.cc#L18-L53)计算 `system->maxBw` 和 `system->totalBw` 等带宽模型参数。`totalBw` 不是全机所有链路带宽之和；当前实现先计算各 DEV 的相关带宽值，再取最大值。
 
 真正的算法图搜索是后面的 `ncclTopoCompute`，到这里还没执行。
 
-[ncclTopoComputeCommCPU](../../nccl/src/graph/search.cc#L56-L63)从当前拓扑 CPU 节点取架构与厂商，写入 `comm->cpuArch/cpuVendor`。它不计算 CPU 运算能力，也不设置线程绑定。随后 `ncclTopoPrint` 打印模型，结束本段拓扑计时。
+[ncclTopoComputeCommCPU](../../../nccl/src/graph/search.cc#L56-L63)从当前拓扑 CPU 节点取架构与厂商，写入 `comm->cpuArch/cpuVendor`。它不计算 CPU 运算能力，也不设置线程绑定。随后 `ncclTopoPrint` 打印模型，结束本段拓扑计时。
 
 ### 13.9 CPU affinity：让初始化线程尽量靠近 GPU
 
-[init.cc:1406–1412](../../nccl/src/init.cc#L1406-L1412)：
+[init.cc:1406–1412](../../../nccl/src/init.cc#L1406-L1412)：
 
 ```cpp
 ncclTopoGetCpuAffinity(comm->topo, comm->rank, &comm->cpuAffinity);
@@ -1457,7 +1457,7 @@ if (ncclOsCpuCount(comm->cpuAffinity)) {
 }
 ```
 
-默认选择 [topo.cc:2447–2472](../../nccl/src/graph/topo.cc#L2447-L2472)中的交集：
+默认选择 [topo.cc:2447–2472](../../../nccl/src/graph/topo.cc#L2447-L2472)中的交集：
 
 ```text
 线程当前允许的 CPU 集合 ∩ 靠近 GPU 的 CPU 集合
@@ -1467,7 +1467,7 @@ if (ncclOsCpuCount(comm->cpuAffinity)) {
 
 为什么通信初始化还关心 CPU？NUMA 系统中的主机内存也有远近关系。让初始化线程靠近 GPU，有利于后续主机资源分配与访问的局部性。
 
-Linux 的 [sched_setaffinity(0, ...)](../../nccl/src/os/linux.cc#L606-L622)作用于当前初始化线程，不是重绑整个应用所有线程。[函数退出时](../../nccl/src/init.cc#L1977-L1978)恢复保存的 affinity。此操作不强制迁移已有内存，也不能保证所有分配绝对落在指定 NUMA 节点。
+Linux 的 [sched_setaffinity(0, ...)](../../../nccl/src/os/linux.cc#L606-L622)作用于当前初始化线程，不是重绑整个应用所有线程。[函数退出时](../../../nccl/src/init.cc#L1977-L1978)恢复保存的 affinity。此操作不强制迁移已有内存，也不能保证所有分配绝对落在指定 NUMA 节点。
 
 **本节小结：到 `init.cc:1412`，已得到结合能力和策略修正、裁剪并重算后的硬件拓扑与路径，以及搜索参数和 CPU affinity。下一节继续把这些硬件路径变成算法图，再完成全局协调、实际连接和 device 状态发布。**
 
@@ -1479,7 +1479,7 @@ Linux 的 [sched_setaffinity(0, ...)](../../nccl/src/os/linux.cc#L606-L622)作�
 
 ### 14.1 特殊入口先放在边界
 
-源码：[init.cc:2136–2191](../../nccl/src/init.cc#L2136-L2191)。
+源码：[init.cc:2136–2191](../../../nccl/src/init.cc#L2136-L2191)。
 
 - **Split/Shrink：**`job->parent && !job->isGrow`。先计算新成员和新 rank，派生子组 hash，然后 `commAlloc(comm, parent, ...)`，再通过 `bootstrapSplit` 借助父组完成协调。
 - **Split 不参与新组：**`NCCL_SPLIT_NOCOLOR` 的 rank 仍参加所需的信息交换，随后提前退出，不走普通成功创建子组的完整路径。
@@ -1490,7 +1490,7 @@ Linux 的 [sched_setaffinity(0, ...)](../../nccl/src/os/linux.cc#L606-L622)作�
 
 ### 14.2 从硬件路径到算法图：`ncclTopoCompute`
 
-主线：[init.cc:1414–1468](../../nccl/src/init.cc#L1414-L1468)。
+主线：[init.cc:1414–1468](../../../nccl/src/init.cc#L1414-L1468)。
 
 先做能力检查：
 
@@ -1506,7 +1506,7 @@ Linux 的 [sched_setaffinity(0, ...)](../../nccl/src/os/linux.cc#L606-L622)作�
 
 `intra[]` 记录局部 rank 顺序，`inter[]` 记录网络端点 ID；`nChannels、bwIntra、bwInter、typeIntra、typeInter` 等字段描述搜索结果和估计约束。图搜索仍是在内存模型中规划，不是建立数据连接。
 
-[`ncclTopoCompute`](../../nccl/src/graph/search.cc#L1151-L1393) 的外层策略可以概括为：
+[`ncclTopoCompute`](../../../nccl/src/graph/search.cc#L1151-L1393) 的外层策略可以概括为：
 
 ```text
 设定 channel 数范围、路径类别上限和候选带宽
@@ -1533,7 +1533,7 @@ Linux 的 [sched_setaffinity(0, ...)](../../nccl/src/os/linux.cc#L606-L622)作�
 
 #### Preset 提取什么？
 
-[`ncclTopoPreset`](../../nccl/src/graph/connect.cc#L20-L93) 将每个 channel 的局部图压缩为 `topoRanks`：
+[`ncclTopoPreset`](../../../nccl/src/graph/connect.cc#L20-L93) 将每个 channel 的局部图压缩为 `topoRanks`：
 
 - `ringRecv/ringSend`：局部 Ring 段的第一个和最后一个 rank，供 node 间拼接。
 - `ringPrev/ringNext`：当前 rank 在局部段中的前后邻居，边界先记为 -1。
@@ -1544,17 +1544,17 @@ Linux 的 [sched_setaffinity(0, ...)](../../nccl/src/os/linux.cc#L606-L622)作�
 
 #### AllGather 交换什么？
 
-[`allGatherInfo`](../../nccl/src/init.cc#L1192-L1206) 主要包含：
+[`allGatherInfo`](../../../nccl/src/init.cc#L1192-L1206) 主要包含：
 
 - `graphInfo`：各算法的 channel 数、带宽、路径类型、`sameChannels`、`crossNic` 等标量。
 - `topoRanks`：上面的局部连接摘要。
 - CPU、网络设备数量与带宽、NVLink 状态和 P2P 参数。
 
-[`bootstrapAllGather`](../../nccl/src/init.cc#L1533) 后，每个 rank 都有全组的这些记录。代码再用 `ringRecv[0]` 识别 NCCL 连接模型中的 node，建立 `rankToNode`、`rankToLocalRank` 和 `nodeRanks`。这里的 node 通常对应主机，也可以是 NVLink 局部域，不能在所有场景下简单等同于物理机器。
+[`bootstrapAllGather`](../../../nccl/src/init.cc#L1533) 后，每个 rank 都有全组的这些记录。代码再用 `ringRecv[0]` 识别 NCCL 连接模型中的 node，建立 `rankToNode`、`rankToLocalRank` 和 `nodeRanks`。这里的 node 通常对应主机，也可以是 NVLink 局部域，不能在所有场景下简单等同于物理机器。
 
 #### 为什么还取舍最小值和最大值？
 
-[`1687–1702 行`](../../nccl/src/init.cc#L1687-L1702) 对每个算法统一参数：
+[`1687–1702 行`](../../../nccl/src/init.cc#L1687-L1702) 对每个算法统一参数：
 
 | 字段 | 对齐方式 | 目的 |
 |---|---|---|
@@ -1568,7 +1568,7 @@ Linux 的 [sched_setaffinity(0, ...)](../../nccl/src/os/linux.cc#L606-L622)作�
 
 ### 14.4 Postset：把局部段拼成全局 Ring/Tree
 
-[`ncclTopoPostset`](../../nccl/src/graph/connect.cc#L380-L533) 使用各 rank 的 `topoRanks` 和 node 信息，完成真正的全局邻接拼接。
+[`ncclTopoPostset`](../../../nccl/src/graph/connect.cc#L380-L533) 使用各 rank 的 `topoRanks` 和 node 信息，完成真正的全局邻接拼接。
 
 以两个局部 Ring 段为例：
 
@@ -1577,7 +1577,7 @@ node 0：0 → 1，入口 0、出口 1
 node 1：2 → 3，入口 2、出口 3
 ```
 
-[`connectRings`](../../nccl/src/graph/connect.cc#L95-L113) 只补 node 边界：
+[`connectRings`](../../../nccl/src/graph/connect.cc#L95-L113) 只补 node 边界：
 
 ```text
 next[1] = 2，prev[2] = 1
@@ -1590,25 +1590,25 @@ next[3] = 0，prev[0] = 3
 0 → 1 → 2 → 3 → 0
 ```
 
-Tree 则由 [`connectTrees`](../../nccl/src/graph/connect.cc#L138-L176) 按 node 间树形和局部端点设置 `tree.up/down`，并使用 Preset 准备的两套 channel 槽位。之后还会按运行时规则复制或调整 channel 数，所以**图搜索得到的 nChannels 不是最终运行时 channel 数**。
+Tree 则由 [`connectTrees`](../../../nccl/src/graph/connect.cc#L138-L176) 按 node 间树形和局部端点设置 `tree.up/down`，并使用 Preset 准备的两套 channel 槽位。之后还会按运行时规则复制或调整 channel 数，所以**图搜索得到的 nChannels 不是最终运行时 channel 数**。
 
-最后 [`ncclBuildRings`](../../nccl/src/graph/rings.cc#L29-L74) 从当前 rank 沿 `next` 走 `nRanks` 步，生成每个 channel 的 `rings[]`，并检查是否回到起点、是否覆盖全部 rank。到这里才有完整的逻辑 Ring/Tree；实际 P2P/SHM/NET 连接仍未因此全部建立。
+最后 [`ncclBuildRings`](../../../nccl/src/graph/rings.cc#L29-L74) 从当前 rank 沿 `next` 走 `nRanks` 步，生成每个 channel 的 `rings[]`，并检查是否回到起点、是否覆盖全部 rank。到这里才有完整的逻辑 Ring/Tree；实际 P2P/SHM/NET 连接仍未因此全部建立。
 
 ### 14.5 准备运行参数、共享资源和 proxy
 
-主线：[init.cc:1755–1810](../../nccl/src/init.cc#L1755-L1810)。
+主线：[init.cc:1755–1810](../../../nccl/src/init.cc#L1755-L1810)。
 
 1. **`computeBuffSizes`**：确定 LL/LL128/SIMPLE 的 buffer 大小和 P2P chunk 大小。多 node、全 NVLink 单 node、其他单 node 场景采用不同的 chunk 参考值，并受 SIMPLE buffer 和 parent 限制。
 2. **`ncclTopoComputeP2pChannels`**：分别确定 collective 的 `nChannels`、P2P 总 channel 数和每 peer channel 数；按配置和共享 parent 限制调整为合适的 2 的幂，并初始化额外 P2P channel。
 3. **共享资源**：在 proxy 操作前保存 top parent 的 channel、localRank 和 rank 映射，建立 `topParentLocalRanks`，避免 split comm 错用不同编号空间。
 4. **P2P 类型检查**：`ncclTransportCheckP2pType` 得到 `isAllDirectP2p`、`directMode`、`isAllCudaP2p`，这些只是能力标志。
-5. **proxy service**：可共享时复用 parent 的 `proxyState`，否则由 [`ncclProxyCreate`](../../nccl/src/proxy.cc#L2130-L2166) 启动 service/UDS 线程。此前的 `ncclProxyInit` 只是准备状态和入口。
+5. **proxy service**：可共享时复用 parent 的 `proxyState`，否则由 [`ncclProxyCreate`](../../../nccl/src/proxy.cc#L2130-L2166) 启动 service/UDS 线程。此前的 `ncclProxyInit` 只是准备状态和入口。
 
-随后 [`ncclP2pSchedule`](../../nccl/src/init.cc#L1083-L1161) 为每个 rank 生成 `(sendRank, recvRank)` 调度项。它先把各 node 的 rank 分组，再用组间 `groupDelta` 和组内偏移错开通信顺序，目标是覆盖配对关系并减少所有 rank 同时按同一顺序访问 peer 的竞争。它是 P2P 调度表，不是 collective Ring 的顺序。
+随后 [`ncclP2pSchedule`](../../../nccl/src/init.cc#L1083-L1161) 为每个 rank 生成 `(sendRank, recvRank)` 调度项。它先把各 node 的 rank 分组，再用组间 `groupDelta` 和组内偏移错开通信顺序，目标是覆盖配对关系并减少所有 rank 同时按同一顺序访问 peer 的竞争。它是 P2P 调度表，不是 collective Ring 的顺序。
 
 ### 14.6 `setupChannel` 与实际 transport 连接
 
-两种连接模式都会先对每个 collective channel 调用 [`setupChannel`](../../nccl/src/init.cc#L984-L1000)：
+两种连接模式都会先对每个 collective channel 调用 [`setupChannel`](../../../nccl/src/init.cc#L984-L1000)：
 
 - `initChannel` 准备 host/device peer 数组、ring 映射和相关共享资源。
 - 将 Postset 的 `rings` 转成当前 rank 的 `ring.userRanks`、`rankToIndex` 和相对 `ring.index`。
@@ -1617,7 +1617,7 @@ Tree 则由 [`connectTrees`](../../nccl/src/graph/connect.cc#L138-L176) 按 node
 
 #### 非 runtimeConn：初始化阶段 eager 建连
 
-[`ncclTransportRingConnect`](../../nccl/src/transport/generic.cc#L14-L47) 和 [`ncclTransportTreeConnect`](../../nccl/src/transport/generic.cc#L49-L67) 先登记需求，再由 [`ncclTransportP2pSetup`](../../nccl/src/transport.cc#L125-L250) 完成传输准备：
+[`ncclTransportRingConnect`](../../../nccl/src/transport/generic.cc#L14-L47) 和 [`ncclTransportTreeConnect`](../../../nccl/src/transport/generic.cc#L49-L67) 先登记需求，再由 [`ncclTransportP2pSetup`](../../../nccl/src/transport.cc#L125-L250) 完成传输准备：
 
 ```text
 ncclTransportP2pConnect：connectSend/connectRecv 位图登记
@@ -1635,24 +1635,24 @@ Ring 为每个 channel 登记前驱接收和后继发送；Tree 登记 parent/ch
 comm->runtimeConn = comm->cuMemSupport && ncclParamRuntimeConnect();
 ```
 
-runtime 分支在初始化时只做 `setupChannel`、NVLS setup 和适用的 CollNet setup。后续任务第一次选择某算法时，再由 [`ncclCollPreconnect`](../../nccl/src/group.cc#L226-L280) 调用相同的 Ring/Tree/NVLS/CollNet/PAT 连接函数。
+runtime 分支在初始化时只做 `setupChannel`、NVLS setup 和适用的 CollNet setup。后续任务第一次选择某算法时，再由 [`ncclCollPreconnect`](../../../nccl/src/group.cc#L226-L280) 调用相同的 Ring/Tree/NVLS/CollNet/PAT 连接函数。
 
 因此，**runtimeConn 是延迟连接，不是省略连接**；首轮 collective 可能承担额外建连成本。
 
 ### 14.7 tuning、device 端发布与收尾
 
-[`ncclTuningInit`](../../nccl/src/tuning/tuning.cc#L44-L107) 初始化 cost model、tuner 插件和线程阈值，为之后按 collective、消息大小和资源选择算法提供模型；它不是此刻为所有 collective 选定唯一算法。
+[`ncclTuningInit`](../../../nccl/src/tuning/tuning.cc#L44-L107) 初始化 cost model、tuner 插件和线程阈值，为之后按 collective、消息大小和资源选择算法提供模型；它不是此刻为所有 collective 选定唯一算法。
 
 随后代码根据全组共同能力计算 GIN、RMA、symmetric 等高级特性标志。普通 Ring/Tree 不依赖这些可选能力。
 
-[`devCommSetup`](../../nccl/src/init.cc#L712-L853) 是 host 状态交给 device 的关键步骤：
+[`devCommSetup`](../../../nccl/src/init.cc#L712-L853) 是 host 状态交给 device 的关键步骤：
 
 - 分配 device 端 `ncclKernelCommAndChannels`，让 `comm->devComm` 指向 device 内存中的 communicator。
 - 复制 rank、node、buffer、P2P、rank 映射和 channel 的 ring/tree/collnet/nvls 元数据。
 - 将 `ring.userRanks` 等 host 指针替换为 `devRingUserRanks` 等 device 指针，再复制实际数组内容。
 - 准备工作 FIFO、profiler 计数器和可选的 RAS counters，并同步 device stream。
 
-之后创建 profiler 线程；如果启用 RMA eager init，再提前建立相应 signal/proxy 资源。最后执行 [`bootstrapIntraNodeBarrier`](../../nccl/src/init.cc#L1968-L1971)，只同步当前 NCCL node 内的 rank，确保本地共享资源准备完成。
+之后创建 profiler 线程；如果启用 RMA eager init，再提前建立相应 signal/proxy 资源。最后执行 [`bootstrapIntraNodeBarrier`](../../../nccl/src/init.cc#L1968-L1971)，只同步当前 NCCL node 内的 rank，确保本地共享资源准备完成。
 
 统一 `exit` 路径恢复初始化前保存的 CPU affinity，按共享资源条件处理 proxy shm，并释放 AllGather、Postset 等临时数组。**到这里，普通新建 communicator 的 `initTransportsRank` 主线完成；特殊算法的深层实现和派生 communicator 路径属于后续专题。**
 
@@ -1662,14 +1662,14 @@ runtime 分支在初始化时只做 `setupChannel`、NVLS setup 和适用的 Col
 
 ### 15.1 完成与失败通过 initState 发布
 
-回调执行完传输初始化后尝试启动进度计数监控；该监控失败会记日志，但不阻止初始化主线继续。随后发布成功，见 [init.cc:2198–2208](../../nccl/src/init.cc#L2198-L2208)：
+回调执行完传输初始化后尝试启动进度计数监控；该监控失败会记日志，但不阻止初始化主线继续。随后发布成功，见 [init.cc:2198–2208](../../../nccl/src/init.cc#L2198-L2208)：
 
 ```cpp
 COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
                       std::memory_order_release);
 ```
 
-失败路径则将错误码写入 `initState`，见 [2241–2250 行](../../nccl/src/init.cc#L2241-L2250)。
+失败路径则将错误码写入 `initState`，见 [2241–2250 行](../../../nccl/src/init.cc#L2241-L2250)。
 
 为什么用 release？任务可能由另一个线程执行。正确配对的 acquire 读取观察到发布状态后，应同时观察到此前完成的初始化写入；不是只让一个状态整数发生变化。
 
@@ -1685,7 +1685,7 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 | `comm->asyncResult` | 对外查询的异步主机操作状态/错误 |
 | CUDA stream/event 完成 | 相应 GPU 工作是否已完成 |
 
-非阻塞 Group 会设置 `asyncResult=ncclInProgress`，结束时更新结果。[ncclCommGetAsyncError](../../nccl/src/init.cc#L3934-L3967) 读取该字段，并在成功且存在关联 Group job 时完成线程回收；它不只是读取 `initState`。
+非阻塞 Group 会设置 `asyncResult=ncclInProgress`，结束时更新结果。[ncclCommGetAsyncError](../../../nccl/src/init.cc#L3934-L3967) 读取该字段，并在成功且存在关联 Group job 时完成线程回收；它不只是读取 `initState`。
 
 因此：
 
@@ -1696,7 +1696,7 @@ COMPILER_ATOMIC_STORE(&comm->initState, ncclSuccess,
 
 ### 15.3 错误宏表达不同的失败策略
 
-见 [checks.h:24–43](../../nccl/src/include/checks.h#L24-L43) 和 [158–166 行](../../nccl/src/include/checks.h#L158-L166)。
+见 [checks.h:24–43](../../../nccl/src/include/checks.h#L24-L43) 和 [158–166 行](../../../nccl/src/include/checks.h#L158-L166)。
 
 | 宏 | 行为 |
 |---|---|
@@ -1790,56 +1790,56 @@ peerInfo 检查行按正常完整扫描路径理解；当前源码的非均匀�
 
 | 入口 | 对应内容 |
 |---|---|
-| [init.cc:209](../../nccl/src/init.cc#L209) | unique ID 的公开生成入口 |
-| [init.cc:2946](../../nccl/src/init.cc#L2946) | `ncclCommInitRank` 公开包装 |
-| [init.cc:183](../../nccl/src/init.cc#L183) | 进程级 `ncclInit` |
-| [init.cc:2851](../../nccl/src/init.cc#L2851) | `ncclCommInitRankDev` |
-| [group.cc:36](../../nccl/src/group.cc#L36) | `ncclAsyncLaunch` 入队 |
-| [group.cc:1039](../../nccl/src/group.cc#L1039) | 最外层 GroupEnd 调度 |
-| [group.cc:609](../../nccl/src/group.cc#L609) | 单/多任务执行分支 |
-| [init.cc:2105](../../nccl/src/init.cc#L2105) | 初始化回调 |
-| [enqueue.cc:55](../../nccl/src/enqueue/enqueue.cc#L55) | kernel 资源准备 |
-| [init.cc:2179](../../nccl/src/init.cc#L2179) | 普通路径 hash |
-| [init.cc:512](../../nccl/src/init.cc#L512) | `commAlloc` 本地资源初始化 |
-| [bootstrap.cc:408](../../nccl/src/bootstrap.cc#L408) | root 服务创建 |
-| [bootstrap.cc:291](../../nccl/src/bootstrap.cc#L291) | root 报到处理与邻居信息分发 |
-| [bootstrap.cc:754](../../nccl/src/bootstrap.cc#L754) | 各 rank 的 bootstrap 初始化 |
-| [bootstrap.cc:687](../../nccl/src/bootstrap.cc#L687) | Socket 环连接 |
-| [bootstrap.cc:896](../../nccl/src/bootstrap.cc#L896-L964) | 服务入口准备、全组信息交换与返回 |
-| [bootstrap.cc:558](../../nccl/src/bootstrap.cc#L558-L563) | `getUDS` 生成 IPC 命名标识 |
-| [bootstrap.cc:701](../../nccl/src/bootstrap.cc#L701-L735) | `ringAllInfo` 打包、交换与拆包 |
-| [bootstrap.cc:1413](../../nccl/src/bootstrap.cc#L1413-L1438) | `bootstrapAllGather` 后端选择 |
-| [bootstrap.cc:1363](../../nccl/src/bootstrap.cc#L1363-L1412) | 当前 Socket 双向环 AllGather |
-| [proxy.cc:2111](../../nccl/src/proxy.cc#L2111-L2128) | `ncclProxyInit` 准备状态与 IPC socket |
-| [proxy.cc:2130](../../nccl/src/proxy.cc#L2130-L2165) | 后续 `ncclProxyCreate` 启动服务线程 |
-| [init.cc:1234](../../nccl/src/init.cc#L1234-L1239) | `peerInfo` 分配、交换与发布 |
-| [init.cc:888](../../nccl/src/init.cc#L888-L982) | `fillInfo` 的身份与能力采集 |
-| [transport.h:46](../../nccl/src/include/transport.h#L46-L74) | `ncclPeerInfo` 记录类型 |
-| [init.cc:1241](../../nccl/src/init.cc#L1241-L1314) | 连续区间、兼容性检查与能力汇总 |
-| [mnnvl.cc:14](../../nccl/src/mnnvl.cc#L14-L94) | MNNVL 条件与 Fabric handle 检查 |
-| [init.cc:1322](../../nccl/src/init.cc#L1322-L1379) | 同进程编号、对象链表与协调状态 |
-| [init.cc:1381](../../nccl/src/init.cc#L1381-L1412) | 拓扑发现、路径处理与 affinity 主线 |
-| [topo.cc:1989](../../nccl/src/graph/topo.cc#L1989-L2178) | `ncclTopoGetSystem` 与 XML 融合 |
-| [topo.h:46](../../nccl/src/graph/topo.h#L46-L183) | 拓扑节点、连接、路径与系统结构 |
-| [paths.cc:52](../../nccl/src/graph/paths.cc#L52-L147) | 路径扩展与候选比较规则 |
-| [paths.cc:754](../../nccl/src/graph/paths.cc#L754-L898) | `ncclTopoComputePaths` 与策略修正 |
-| [paths.cc:900](../../nccl/src/graph/paths.cc#L900-L945) | `ncclTopoTrimSystem` 裁剪局部图 |
-| [search.cc:18](../../nccl/src/graph/search.cc#L18-L63) | 搜索参数与 CPU 类型准备 |
-| [topo.cc:2447](../../nccl/src/graph/topo.cc#L2447-L2490) | CPU affinity 选择 |
-| [init.cc:1414–1468](../../nccl/src/init.cc#L1414-L1468) | CollNet/NVLS 检查与各类 `ncclTopoGraph` 的建立 |
-| [search.cc:1151](../../nccl/src/graph/search.cc#L1151) | `ncclTopoCompute`：局部算法图搜索、放宽、复制、提速和兜底 |
-| [init.cc:1531](../../nccl/src/init.cc#L1531) | `ncclTopoPreset` 与 AllGather3 的入口；1533 行交换图摘要 |
-| [init.cc:1542–1711](../../nccl/src/init.cc#L1542-L1711) | node/localRank 组织、全局图参数对齐和最终 channel 数 |
-| [connect.cc:20、380](../../nccl/src/graph/connect.cc#L20) | `ncclTopoPreset`、`ncclTopoPostset`；95、138 行分别为 Ring/Tree 拼接 |
-| [rings.cc:29](../../nccl/src/graph/rings.cc#L29) | `ncclBuildRings` 生成并校验完整 Ring |
-| [init.cc:1755–1810](../../nccl/src/init.cc#L1755-L1810) | buffer、P2P channel、sharedRes、proxy 和 P2P schedule |
-| [init.cc:984](../../nccl/src/init.cc#L984) | `setupChannel`：rings 转为当前 rank 的运行时 channel 元数据 |
-| [generic.cc:14、49](../../nccl/src/transport/generic.cc#L14) | Ring/Tree transport connect；[transport.cc:46、125](../../nccl/src/transport.cc#L46) 是需求登记与通用建连 |
-| [init.cc:1811](../../nccl/src/init.cc#L1811) | `runtimeConn` 的 eager/lazy 连接分支 |
-| [group.cc:226](../../nccl/src/group.cc#L226) | 首次使用算法时的 `ncclCollPreconnect` |
-| [tuning/tuning.cc:44](../../nccl/src/tuning/tuning.cc#L44) | `ncclTuningInit` 初始化调优模型 |
-| [init.cc:1898–1978](../../nccl/src/init.cc#L1898-L1978) | tuning、能力标志、`devCommSetup`、profiler、barrier 和 affinity 恢复 |
-| [init.cc:712](../../nccl/src/init.cc#L712) | `devCommSetup`：host 状态到 device 端 comm/channel |
+| [init.cc:209](../../../nccl/src/init.cc#L209) | unique ID 的公开生成入口 |
+| [init.cc:2946](../../../nccl/src/init.cc#L2946) | `ncclCommInitRank` 公开包装 |
+| [init.cc:183](../../../nccl/src/init.cc#L183) | 进程级 `ncclInit` |
+| [init.cc:2851](../../../nccl/src/init.cc#L2851) | `ncclCommInitRankDev` |
+| [group.cc:36](../../../nccl/src/group.cc#L36) | `ncclAsyncLaunch` 入队 |
+| [group.cc:1039](../../../nccl/src/group.cc#L1039) | 最外层 GroupEnd 调度 |
+| [group.cc:609](../../../nccl/src/group.cc#L609) | 单/多任务执行分支 |
+| [init.cc:2105](../../../nccl/src/init.cc#L2105) | 初始化回调 |
+| [enqueue.cc:55](../../../nccl/src/enqueue/enqueue.cc#L55) | kernel 资源准备 |
+| [init.cc:2179](../../../nccl/src/init.cc#L2179) | 普通路径 hash |
+| [init.cc:512](../../../nccl/src/init.cc#L512) | `commAlloc` 本地资源初始化 |
+| [bootstrap.cc:408](../../../nccl/src/bootstrap.cc#L408) | root 服务创建 |
+| [bootstrap.cc:291](../../../nccl/src/bootstrap.cc#L291) | root 报到处理与邻居信息分发 |
+| [bootstrap.cc:754](../../../nccl/src/bootstrap.cc#L754) | 各 rank 的 bootstrap 初始化 |
+| [bootstrap.cc:687](../../../nccl/src/bootstrap.cc#L687) | Socket 环连接 |
+| [bootstrap.cc:896](../../../nccl/src/bootstrap.cc#L896-L964) | 服务入口准备、全组信息交换与返回 |
+| [bootstrap.cc:558](../../../nccl/src/bootstrap.cc#L558-L563) | `getUDS` 生成 IPC 命名标识 |
+| [bootstrap.cc:701](../../../nccl/src/bootstrap.cc#L701-L735) | `ringAllInfo` 打包、交换与拆包 |
+| [bootstrap.cc:1413](../../../nccl/src/bootstrap.cc#L1413-L1438) | `bootstrapAllGather` 后端选择 |
+| [bootstrap.cc:1363](../../../nccl/src/bootstrap.cc#L1363-L1412) | 当前 Socket 双向环 AllGather |
+| [proxy.cc:2111](../../../nccl/src/proxy.cc#L2111-L2128) | `ncclProxyInit` 准备状态与 IPC socket |
+| [proxy.cc:2130](../../../nccl/src/proxy.cc#L2130-L2165) | 后续 `ncclProxyCreate` 启动服务线程 |
+| [init.cc:1234](../../../nccl/src/init.cc#L1234-L1239) | `peerInfo` 分配、交换与发布 |
+| [init.cc:888](../../../nccl/src/init.cc#L888-L982) | `fillInfo` 的身份与能力采集 |
+| [transport.h:46](../../../nccl/src/include/transport.h#L46-L74) | `ncclPeerInfo` 记录类型 |
+| [init.cc:1241](../../../nccl/src/init.cc#L1241-L1314) | 连续区间、兼容性检查与能力汇总 |
+| [mnnvl.cc:14](../../../nccl/src/mnnvl.cc#L14-L94) | MNNVL 条件与 Fabric handle 检查 |
+| [init.cc:1322](../../../nccl/src/init.cc#L1322-L1379) | 同进程编号、对象链表与协调状态 |
+| [init.cc:1381](../../../nccl/src/init.cc#L1381-L1412) | 拓扑发现、路径处理与 affinity 主线 |
+| [topo.cc:1989](../../../nccl/src/graph/topo.cc#L1989-L2178) | `ncclTopoGetSystem` 与 XML 融合 |
+| [topo.h:46](../../../nccl/src/graph/topo.h#L46-L183) | 拓扑节点、连接、路径与系统结构 |
+| [paths.cc:52](../../../nccl/src/graph/paths.cc#L52-L147) | 路径扩展与候选比较规则 |
+| [paths.cc:754](../../../nccl/src/graph/paths.cc#L754-L898) | `ncclTopoComputePaths` 与策略修正 |
+| [paths.cc:900](../../../nccl/src/graph/paths.cc#L900-L945) | `ncclTopoTrimSystem` 裁剪局部图 |
+| [search.cc:18](../../../nccl/src/graph/search.cc#L18-L63) | 搜索参数与 CPU 类型准备 |
+| [topo.cc:2447](../../../nccl/src/graph/topo.cc#L2447-L2490) | CPU affinity 选择 |
+| [init.cc:1414–1468](../../../nccl/src/init.cc#L1414-L1468) | CollNet/NVLS 检查与各类 `ncclTopoGraph` 的建立 |
+| [search.cc:1151](../../../nccl/src/graph/search.cc#L1151) | `ncclTopoCompute`：局部算法图搜索、放宽、复制、提速和兜底 |
+| [init.cc:1531](../../../nccl/src/init.cc#L1531) | `ncclTopoPreset` 与 AllGather3 的入口；1533 行交换图摘要 |
+| [init.cc:1542–1711](../../../nccl/src/init.cc#L1542-L1711) | node/localRank 组织、全局图参数对齐和最终 channel 数 |
+| [connect.cc:20、380](../../../nccl/src/graph/connect.cc#L20) | `ncclTopoPreset`、`ncclTopoPostset`；95、138 行分别为 Ring/Tree 拼接 |
+| [rings.cc:29](../../../nccl/src/graph/rings.cc#L29) | `ncclBuildRings` 生成并校验完整 Ring |
+| [init.cc:1755–1810](../../../nccl/src/init.cc#L1755-L1810) | buffer、P2P channel、sharedRes、proxy 和 P2P schedule |
+| [init.cc:984](../../../nccl/src/init.cc#L984) | `setupChannel`：rings 转为当前 rank 的运行时 channel 元数据 |
+| [generic.cc:14、49](../../../nccl/src/transport/generic.cc#L14) | Ring/Tree transport connect；[transport.cc:46、125](../../../nccl/src/transport.cc#L46) 是需求登记与通用建连 |
+| [init.cc:1811](../../../nccl/src/init.cc#L1811) | `runtimeConn` 的 eager/lazy 连接分支 |
+| [group.cc:226](../../../nccl/src/group.cc#L226) | 首次使用算法时的 `ncclCollPreconnect` |
+| [tuning/tuning.cc:44](../../../nccl/src/tuning/tuning.cc#L44) | `ncclTuningInit` 初始化调优模型 |
+| [init.cc:1898–1978](../../../nccl/src/init.cc#L1898-L1978) | tuning、能力标志、`devCommSetup`、profiler、barrier 和 affinity 恢复 |
+| [init.cc:712](../../../nccl/src/init.cc#L712) | `devCommSetup`：host 状态到 device 端 comm/channel |
 
 ### 16.4 普通主线已完整，进阶阅读按问题继续
 

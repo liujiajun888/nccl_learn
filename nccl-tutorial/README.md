@@ -24,7 +24,7 @@
 10 开发工作流 → 11 测试与调试：开始做小改动
 ```
 
-[软件栈全景](appendix/software-stack.md) 用作**目录和名词地图**，不必在第一遍逐节精读。
+[软件栈全景](appendix/reference/software-stack.md) 用作**目录和名词地图**，不必在第一遍逐节精读。
 
 每个阶段只记录四件事：**输入、动作、产物、下一消费者**。第一次阅读可先跳过递归搜索细节、调度公式、FIFO 容量、特殊硬件和异常分支。
 
@@ -59,8 +59,8 @@
 | [09 内存与生命周期](09-memory-and-lifetime.md) | 理解用户 buffer、内部缓冲、描述和注册何时回收 |
 | [10 开发工作流](10-development-workflow.md) | 做一次不改变行为的源码插桩并建立开发闭环 |
 | [11 测试与调试](11-testing-and-debugging.md) | 按初始化、连接、提交、GPU、NET、完成阶段定位问题 |
-| [环境准备](appendix/environment.md) | 需要构建本地 NCCL、核对加载库和运行基线时 |
-| [软件栈全景](appendix/software-stack.md) | 回查分层职责和 `src/` 目录地图 |
+| [环境准备](appendix/reference/environment.md) | 需要构建本地 NCCL、核对加载库和运行基线时 |
+| [软件栈全景](appendix/reference/software-stack.md) | 回查分层职责和 `src/` 目录地图 |
 
 ## 4. 用实践确认“看懂”
 
@@ -78,18 +78,18 @@ python3 nccl-tutorial/examples/ring_simulator.py --ranks 4 --chunk-size 2
 python3 nccl-tutorial/examples/ring_simulator.py --self-test
 ```
 
-GPU 构建与运行方法见 [环境准备](appendix/environment.md) 和 [示例说明](examples/README.md)。
+GPU 构建与运行方法见 [环境准备](appendix/reference/environment.md) 和 [示例说明](examples/README.md)。
 
 ## 5. 进阶参考与专题附录
 
 主线看懂以后，先查 [附录阅读指南](appendix/README.md)，再按问题选择，不必全部顺序阅读：
 
-- **Host 与算法实现：**[Host 执行进阶](appendix/host-execution.md)、[Device 执行进阶](appendix/device-execution.md)、[集合算法进阶](appendix/algorithms.md)。
-- **初始化与拓扑：**[Communicator 进阶](appendix/communicator.md)、[Topology 进阶](appendix/topology.md)、[ncclCommInitRank 完整初始化精读](appendix/nccl-comm-init-rank.md)。
-- **传输、网络与生命周期：**[Transport 进阶](appendix/transports.md)、[Proxy 与网络进阶](appendix/proxy-and-network.md)、[内存与生命周期进阶](appendix/memory-and-lifetime.md)。
-- **开发与验证：**[开发工作流进阶](appendix/development-workflow.md)、[测试与调试进阶](appendix/testing-and-debugging.md)。
-- **接口、测试与性能：**[集合接口与布局](appendix/collectives.md)、[nccl-tests](appendix/nccl-tests.md)、[性能分析](appendix/performance.md)。
-- **扩展机制：**[现代特性](appendix/modern-features.md)、[NVLS](appendix/nvls.md)、[CollNet](appendix/collnet.md)、[MNNVL](appendix/mnnvl.md)、[NVML](appendix/nvml.md)。
+- **Host 与算法实现：**[Host 执行进阶](appendix/deep-dive/host-execution.md)、[Device 执行进阶](appendix/deep-dive/device-execution.md)、[集合算法进阶](appendix/deep-dive/algorithms.md)。
+- **初始化与拓扑：**[Communicator 进阶](appendix/deep-dive/communicator.md)、[Topology 进阶](appendix/deep-dive/topology.md)、[ncclCommInitRank 完整初始化精读](appendix/initialization/nccl-comm-init-rank.md)。
+- **传输、网络与生命周期：**[Transport 进阶](appendix/deep-dive/transports.md)、[Proxy 与网络进阶](appendix/deep-dive/proxy-and-network.md)、[内存与生命周期进阶](appendix/deep-dive/memory-and-lifetime.md)。
+- **开发与验证：**[开发工作流进阶](appendix/deep-dive/development-workflow.md)、[测试与调试进阶](appendix/deep-dive/testing-and-debugging.md)。
+- **接口、测试与性能：**[集合接口与布局](appendix/reference/collectives.md)、[nccl-tests](appendix/reference/nccl-tests.md)、[性能分析](appendix/reference/performance.md)。
+- **扩展机制：**[现代特性](appendix/features/modern-features.md)、[NVLS](appendix/features/nvls.md)、[CollNet](appendix/features/collnet.md)、[MNNVL](appendix/features/mnnvl.md)、[NVML](appendix/features/nvml.md)。
 
 ## 6. 贯穿案例与源码基线
 

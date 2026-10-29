@@ -4,7 +4,7 @@
 
 先不研究完整调优和 Tree 的构造细节，只用一个四 rank 的小例子验证两件事：每份贡献恰好加入一次，最后每个 rank 都得到完整结果。
 
-进阶的带宽公式、双树和候选组合见 [集合算法进阶附录](appendix/algorithms.md)。
+进阶的带宽公式、双树和候选组合见 [集合算法进阶附录](appendix/deep-dive/algorithms.md)。
 
 ## 1. 把问题缩成四块数据
 
@@ -143,4 +143,4 @@ NCCL 还使用双树分担数据和转发负载。第一遍只需理解“缩短
 
 下一步读 [05｜Communicator 初始化](05-communicator.md)，看这些算法使用的成员关系、图、channel 和连接是在什么时候准备好的。
 
-需要完整的手算表、Ring 带宽推导和双树实现时，再读 [集合算法进阶附录](appendix/algorithms.md)。
+需要完整的手算表、Ring 带宽推导和双树实现时，再读 [集合算法进阶附录](appendix/deep-dive/algorithms.md)。

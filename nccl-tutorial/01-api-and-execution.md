@@ -55,7 +55,7 @@ AllReduce 与 ReduceScatter 都做规约，区别是结果完整复制还是按 
 
 可等分的数据先做 ReduceScatter，再做 AllGather，可以得到 AllReduce 的数学结果。第 04 章会说明 Ring 怎样把这两个阶段组织在同一个设备工作体中。
 
-其他集合接口与原地布局放在[接口附录](appendix/collectives.md)，读具体 API 时查即可。
+其他集合接口与原地布局放在[接口附录](appendix/reference/collectives.md)，读具体 API 时查即可。
 
 ## 3. 本地 stream 顺序与跨 rank 顺序
 

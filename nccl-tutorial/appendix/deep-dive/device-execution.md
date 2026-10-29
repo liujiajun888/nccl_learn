@@ -1,8 +1,8 @@
 # 03｜Device execution：让一份 work 在 GPU 上前进
 
-> 阅读定位：进阶原文。先读 [03 Device 执行主线](../03-device-execution.md)，再按协议或 CTA 执行问题查阅，不建议初学者从第一行顺序读完。
+> 阅读定位：进阶原文。先读 [03 Device 执行主线](../../03-device-execution.md)，再按协议或 CTA 执行问题查阅，不建议初学者从第一行顺序读完。
 
-[上一章](../02-host-execution.md) 已把请求变成 CUDA launch 参数和 GPU 可见的工作描述。
+[上一章](../../02-host-execution.md) 已把请求变成 CUDA launch 参数和 GPU 可见的工作描述。
 现在沿同一份 `ncclDevWorkColl`，追到一片数据的发送与接收。
 源码基线为 NCCL **2.32.3**，`12df1a11`。
 
@@ -44,7 +44,7 @@ CTA 在哪个 SM 上执行仍由 CUDA 调度；channel 记录的是工作分区�
 本路径的设备 communicator 经 `comm->devComm` 传入，实际类型是 `ncclKernelComm`。
 它保存 rank 数、协议缓冲大小、channel 地址和 abort 状态等 kernel 所需信息。
 本版另有供 Device API 使用的 `ncclDevComm`，保存窗口、team/barrier 和 GIN 资源；
-该接口见 [现代特性附录](modern-features.md)，本章沿前一种执行上下文追踪。
+该接口见 [现代特性附录](../features/modern-features.md)，本章沿前一种执行上下文追踪。
 
 沿 Ring 的发送方向，取连接的路径是：
 
@@ -186,7 +186,7 @@ Ring 中间节点还要同时满足两个条件：上游已经提供输入，下
 
 连接 step 在构造时按 chunk 配额对齐，结束时写回 `conn->step`，供下一项工作续用。
 对普通 NET，这种交接分别发生在 GPU 与发送 proxy、接收 proxy 与 GPU 之间；
-两端的四个具体进度字段与网络完成条件留到 [08｜Proxy 与网络](../08-proxy-and-network.md)。
+两端的四个具体进度字段与网络完成条件留到 [08｜Proxy 与网络](../../08-proxy-and-network.md)。
 
 同样的算法还可采用其他协议，主要区别在数据布局与就绪通知：
 
@@ -201,12 +201,12 @@ Ring 中间节点还要同时满足两个条件：上游已经提供输入，下
 
 ## 6. 源码入口与离线推演
 
-- [common.h:420](../../nccl/src/device/common.h#L420)：`ncclKernelMain`，channel 映射、装载和两路分派；142 行为 `loadWorkBatchToShmem`。
-- [device.h:430、476](../../nccl/src/include/device.h#L430)：`ncclDevChannel`、`ncclKernelComm`；136 行为连接信息，514 行为 launch 参数。
-- [device.h:287、337](../../nccl/src/include/device.h#L287)：`ncclDevWorkColl`、`ncclCollCbdPart`，恢复数据分区。
-- [all_reduce.h:14、229](../../nccl/src/device/all_reduce.h#L14)：`runRing` 与 Ring/Simple 实例化。
-- [prims_simple.h:103、167](../../nccl/src/device/prims_simple.h#L103)：`waitPeer`、`postPeer`；475、529 行绑定接收与发送角色。
-- [common_kernel.h:40](../../nccl/src/device/common_kernel.h#L40)：`reduceCopyPacks`；97–119 行核对配套的 payload 读取。
+- [common.h:420](../../../nccl/src/device/common.h#L420)：`ncclKernelMain`，channel 映射、装载和两路分派；142 行为 `loadWorkBatchToShmem`。
+- [device.h:430、476](../../../nccl/src/include/device.h#L430)：`ncclDevChannel`、`ncclKernelComm`；136 行为连接信息，514 行为 launch 参数。
+- [device.h:287、337](../../../nccl/src/include/device.h#L287)：`ncclDevWorkColl`、`ncclCollCbdPart`，恢复数据分区。
+- [all_reduce.h:14、229](../../../nccl/src/device/all_reduce.h#L14)：`runRing` 与 Ring/Simple 实例化。
+- [prims_simple.h:103、167](../../../nccl/src/device/prims_simple.h#L103)：`waitPeer`、`postPeer`；475、529 行绑定接收与发送角色。
+- [common_kernel.h:40](../../../nccl/src/device/common_kernel.h#L40)：`reduceCopyPacks`；97–119 行核对配套的 payload 读取。
 
 **离线任务：给一个 CTA 恢复工作，再推进一个满窗口。**
 令 `channelMask=0b10010010`，求 block 1 的 channel。
@@ -217,4 +217,4 @@ Ring 中间节点还要同时满足两个条件：上游已经提供输入，下
 消费后 `head=2`，发送方得以使用槽位 0 起的配额，写完并发布 `tail=10`。
 接收方的下一片仍从逻辑 step 2 开始，按序读取；八槽复用保留了数据的代际关系。
 
-下一章 [04｜集合算法](../04-algorithms.md) 将这些 primitive 连成 Ring 的完整规约与结果传播。
+下一章 [04｜集合算法](../../04-algorithms.md) 将这些 primitive 连成 Ring 的完整规约与结果传播。

@@ -2,7 +2,7 @@
 
 上一章已经得到 `ring.prev/next` 和 `tree.up/down`。本章回答：**这些逻辑关系怎样变成 GPU 或 proxy 真正能用的缓冲、映射和连接？**
 
-本章只讲通用交接，不逐字段展开。P2P 的 IPC 细节、SHM 内部布局和 NET 状态机见 [Transport 进阶附录](appendix/transports.md)。
+本章只讲通用交接，不逐字段展开。P2P 的 IPC 细节、SHM 内部布局和 NET 状态机见 [Transport 进阶附录](appendix/deep-dive/transports.md)。
 
 ## 1. 先分清两种连接对象
 
@@ -131,4 +131,4 @@ bootstrap 将 handle 交给 r1
 
 下一步读 [08｜Proxy 与网络](08-proxy-and-network.md)，看连接建立后，GPU、proxy 和 NIC 怎样共同推进一片数据。
 
-需要 `ncclConnect` 的具体布局、P2P/SHM setup/connect、NET listen/accept 和 GDR 映射细节时，再读 [Transport 进阶附录](appendix/transports.md)。
+需要 `ncclConnect` 的具体布局、P2P/SHM setup/connect、NET listen/accept 和 GDR 映射细节时，再读 [Transport 进阶附录](appendix/deep-dive/transports.md)。

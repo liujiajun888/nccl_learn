@@ -2,7 +2,7 @@
 
 上一章建立了 NET 连接。本章只追一条跨机边：**GPU 产生一片数据后，proxy 怎样提交网络请求，接收 GPU 又何时能读、何时归还槽位？**
 
-proxy op 的聚合、args/sub 字段和插件状态机留到 [Proxy 与网络进阶附录](appendix/proxy-and-network.md)。
+proxy op 的聚合、args/sub 字段和插件状态机留到 [Proxy 与网络进阶附录](appendix/deep-dive/proxy-and-network.md)。
 
 ## 1. 先分清 proxy 的两类工作
 
@@ -157,4 +157,4 @@ R_head 不前进
 
 下一步读 [09｜内存与生命周期](09-memory-and-lifetime.md)，看用户 buffer、内部缓冲、连接和执行描述分别什么时候回收。
 
-需要 proxy op 聚合、request 状态机和插件接口细节时，再读 [Proxy 与网络进阶附录](appendix/proxy-and-network.md)。
+需要 proxy op 聚合、request 状态机和插件接口细节时，再读 [Proxy 与网络进阶附录](appendix/deep-dive/proxy-and-network.md)。

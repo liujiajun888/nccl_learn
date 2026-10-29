@@ -153,10 +153,10 @@ API/collectives
 
 ### 源码起点
 
-- [nccl/src/collectives.cc:192](../../nccl/src/collectives.cc#L192)：`ncclAllReduceConfigImpl` 把 API 参数放入 `ncclInfo`。
-- [nccl/src/include/comm.h:212](../../nccl/src/include/comm.h#L212)：`ncclTaskColl`，主机任务表示。
-- [nccl/src/include/comm.h:357](../../nccl/src/include/comm.h#L357)：`ncclKernelPlan`，一次发射的材料。
-- [nccl/src/device/all_reduce.h:14](../../nccl/src/device/all_reduce.h#L14)：`runRing`，GPU 侧把收发与规约连成算法。
+- [nccl/src/collectives.cc:192](../../../nccl/src/collectives.cc#L192)：`ncclAllReduceConfigImpl` 把 API 参数放入 `ncclInfo`。
+- [nccl/src/include/comm.h:212](../../../nccl/src/include/comm.h#L212)：`ncclTaskColl`，主机任务表示。
+- [nccl/src/include/comm.h:357](../../../nccl/src/include/comm.h#L357)：`ncclKernelPlan`，一次发射的材料。
+- [nccl/src/device/all_reduce.h:14](../../../nccl/src/device/all_reduce.h#L14)：`runRing`，GPU 侧把收发与规约连成算法。
 
 ### 阅读任务：把参数和数据分开
 
@@ -164,4 +164,4 @@ API/collectives
 
 核对点：前者保存指针和参数；后者按工作描述计算数据偏移并调用传输原语。两处之间缺少的任务构造、连接和 launch，正是后面要补齐的软件栈。
 
-下一章：[01 API 与执行约定](../01-api-and-execution.md)。
+下一章：[01 API 与执行约定](../../01-api-and-execution.md)。

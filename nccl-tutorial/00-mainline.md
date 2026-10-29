@@ -86,7 +86,7 @@ NCCL Device      NET 插件与网络后端
 
 初始化还分两层：**逻辑邻接关系**和**实际传输资源**。`ring.next=5` 只说明下一跳是谁，P2P/SHM/NET 的映射、缓冲和连接还需要 transport 建立；部分连接可以延迟到算法首次使用。
 
-源码入口可先看 [`initTransportsRank`](../nccl/src/init.cc#L1163)，完整精读放在[初始化附录](appendix/nccl-comm-init-rank.md)，初学阶段不必逐行展开。
+源码入口可先看 [`initTransportsRank`](../nccl/src/init.cc#L1163)，完整精读放在[初始化附录](appendix/initialization/nccl-comm-init-rank.md)，初学阶段不必逐行展开。
 
 ### 每次 collective：填入当前工作
 
@@ -246,7 +246,7 @@ GPU 已完成 AllReduce
   → 11 测试与调试
 ```
 
-[软件栈全景](appendix/software-stack.md) 可作为目录和名词地图随时回查。首次阅读先不展开：
+[软件栈全景](appendix/reference/software-stack.md) 可作为目录和名词地图随时回查。首次阅读先不展开：
 
 - `ncclTopoCompute` 的递归回溯细节；
 - channel 调度的 cell/流量公式；

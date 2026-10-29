@@ -2,7 +2,7 @@
 
 前面几章都在使用 `comm`：它提供成员关系、拓扑、channel 和连接。现在回头看，**这些资源是怎样在一次初始化中建立起来的？**
 
-本章只讲普通新建 communicator 的主线。完整 API 配置和逐段源码见 [Communicator 进阶附录](appendix/communicator.md) 与 [初始化精读](appendix/nccl-comm-init-rank.md)。
+本章只讲普通新建 communicator 的主线。完整 API 配置和逐段源码见 [Communicator 进阶附录](appendix/deep-dive/communicator.md) 与 [初始化精读](appendix/initialization/nccl-comm-init-rank.md)。
 
 ## 1. 应用先提供三项输入
 
@@ -154,4 +154,4 @@ device 端 communicator、work FIFO 和 profiler 计数器
 
 下一步读 [06｜拓扑与通信图](06-topology.md)，重点看 `ncclTopoSystem → paths → ncclTopoGraph → channels` 这条转换链。
 
-初始化 API 的更多选择、任务调度和异常边界见 [Communicator 进阶附录](appendix/communicator.md)。
+初始化 API 的更多选择、任务调度和异常边界见 [Communicator 进阶附录](appendix/deep-dive/communicator.md)。
